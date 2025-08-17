@@ -340,8 +340,38 @@ def start_workflow(payload: WorkflowStart):
     wb = openpyxl.Workbook()
     sheet = wb.active
     sheet.title = "Workflow Result"
-    sheet.append(['Name', 'TB Code', 'File Found', 'PDF Actual Amount']) # Add new header
+    sheet.append(['Name', 'TB Code', 'File Found', 'PDF Actual Amount', 'TB Code Amount']) # Add new header
     logging.info("Excel workbook created with new header.")
+
+    # Find and read the TB file
+    tb_files_query = f"'{company_folder_id}' in parents and name contains 'tb' and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
+    tb_files = gd.find_files(drive_service, tb_files_query)
+    tb_data = {}
+    if tb_files:
+        tb_file_id = tb_files[0]['id']
+        logging.info(f"TB file found with id: {tb_file_id}")
+        request = drive_service.files().get_media(fileId=tb_file_id)
+        fh = BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        fh.seek(0)
+        tb_wb = openpyxl.load_workbook(fh)
+        tb_sheet = tb_wb.active
+        for row in tb_sheet.iter_rows(min_row=2):
+            tb_code = row[0].value
+            if tb_code:
+                val_col7 = row[6].value if len(row) > 6 else 0
+                val_col8 = row[7].value if len(row) > 7 else 0
+                amount = 0
+                if val_col7 and val_col7 > 0:
+                    amount = val_col7
+                elif val_col8:
+                    amount = -val_col8
+                tb_data[str(tb_code)] = amount
+    else:
+        logging.warning("TB file not found.")
 
     # Add bank data
     for bank in banks:
@@ -365,21 +395,22 @@ def start_workflow(payload: WorkflowStart):
                 amounts.append(amount_from_pdf)
             amount = ", ".join(amounts)
             
-        sheet.append([bank_name, tb_code, file_names, amount])
+        tb_amount = tb_data.get(str(tb_code), "Not Found")
+        sheet.append([bank_name, tb_code, file_names, amount, tb_amount])
 
     # Add form data
     form_data_map = {
-        "PND1": (pnd1_files, forms_map.get("PND1", ""), PROMPTS["PND1"]),
-        "PND3": (pnd3_files, forms_map.get("PND3", ""), PROMPTS["PND3"]),
-        "PND53": (pnd53_files, forms_map.get("PND53", ""), PROMPTS["PND53"]),
-        "PP30": (pp30_files, forms_map.get("PP30", ""), PROMPTS["PP30"]), # No prompt for PP30
-        "SSO": (sso_files, forms_map.get("SSO", ""), PROMPTS["SSO"]),
+        "PND1": (pnd1_files, forms_map.get("PND1", ""), PROMPTS.get("PND1")),
+        "PND3": (pnd3_files, forms_map.get("PND3", ""), PROMPTS.get("PND3")),
+        "PND53": (pnd53_files, forms_map.get("PND53", ""), PROMPTS.get("PND53")),
+        "PP30": (pp30_files, forms_map.get("PP30", ""), PROMPTS.get("PP30")),
+        "SSO": (sso_files, forms_map.get("SSO", ""), PROMPTS.get("SSO")),
     }
 
     for form_name, (files, tb_code, prompt) in form_data_map.items():
         file_names = ", ".join([f['name'] for f in files])
         amount = "N/A"
-        if files and prompt != "N/A":
+        if files and prompt:
             amounts = []
             for f in files:
                 request = drive_service.files().get_media(fileId=f['id'])
@@ -393,7 +424,8 @@ def start_workflow(payload: WorkflowStart):
                 amounts.append(amount_from_pdf)
             amount = ", ".join(amounts)
 
-        sheet.append([form_name, tb_code, file_names, amount])
+        tb_amount = tb_data.get(str(tb_code), "Not Found")
+        sheet.append([form_name, tb_code, file_names, amount, tb_amount])
     
     logging.info("Data added to the sheet.")
 
