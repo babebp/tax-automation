@@ -12,4 +12,6 @@ wheels/
 *.db
 .streamlit
 *.log
+venv
+
 

@@ -1,4 +1,6 @@
-# main.py
+from io import BytesIO
+from googleapiclient.http import MediaIoBaseDownload
+import google.generativeai as genai 
 import logging
 from typing import List, Optional, Dict
 from fastapi import FastAPI, HTTPException, Depends
@@ -8,20 +10,31 @@ import sqlite3
 from contextlib import contextmanager
 from fastapi.responses import StreamingResponse
 import openpyxl
-from io import BytesIO
+from dotenv import load_dotenv
+import os
 
-import google_drive as gd # Import the new module
+load_dotenv() # Load environment variables from .env file
+
+import google_drive as gd
+# ... (rest of the file)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     handlers=[logging.FileHandler("app.log"), logging.StreamHandler()])
 
+# Configure Gemini API
+# IMPORTANT: The API key should be set in your environment or a secure config
+# For this project, we assume it's in .streamlit/secrets.toml and loaded by the environment
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    logging.warning("GEMINI_API_KEY environment variable not set. PDF processing will fail.")
+
 DB_PATH = "app.db"
 
-# ... (rest of the file is the same)
-
-# ---------- Database helpers ----------
+# ... (Database helpers and Pydantic schemas remain the same) ...
 @contextmanager
 def get_conn():
     """Context manager to handle database connection."""
@@ -93,10 +106,37 @@ class WorkflowStart(BaseModel):
     month: str
     year: int
 
+# ---------- New Helper Functions for PDF and LLM ----------
+def get_amount_from_gemini(file_content: bytes, prompt: str) -> str:
+    """Sends a PDF file to Gemini LLM for OCR and returns the extracted amount."""
+    if not GEMINI_API_KEY:
+        return "GEMINI_API_KEY not set"
+    if not file_content:
+        return "No file content"
+
+    try:
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": file_content}])
+        return response.text.strip()
+    except Exception as e:
+        logging.error(f"Gemini API call failed: {e}")
+        return f"Error: {e}"
+
 # ---------- Constants ----------
 FIXED_FORMS = ["PND1", "PND3", "PND53", "PP30", "SSO"]
 
-# ---------- App ----------
+PROMPTS = {
+    "BANK": "หายอดคงเหลืสุดท้ายให้หน่อย ตอบมาแค่ตัวเลขเท่านั้น ห้ามมีตัวหนังสืออื่นๆเด็ดขาด",
+    "PND1": "ภายในหัวข้อ \"สำหรับใบเสร็จรับเงิน\" ให้ตัวเลขของ \"จำนวนเงิน\" ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด",
+    "PND3": "ภายในหัวข้อ \"สำหรับใบเสร็จรับเงิน\" ให้ตัวเลขของ \"จำนวนเงิน\" ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด",
+    "PND53": "ภายในหัวข้อ \"สำหรับใบเสร็จรับเงิน\" ให้ตัวเลขของ \"จำนวนเงิน\" ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด",
+    "PP30": """ภายในหัวข้อ \"ภาษีสุทธิ\" ให้ดึงตัวเลขของช่องที่ 11 หรือช่องที่ 12 มาโดยหากดึงจากช่อง 11 ให้ดึงมาตรงๆ แต่ถ้าเป็นช่องที่ 12 ให้ดึงแล้วเปลี่ยนเป็นค่าลบ ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามที่ตัวหนังสือเด็ดขาด
+
+หมายเหตุ: ในเอกสารจะมีเลขแค่ช่องใดช่องหนึ่งเท่านั้น (ไม่ 11 ก็ 12)""",
+    "SSO": "ภายในหัวข้อ \"จำนวนเงินที่ำระ\" ให้ตัวเลออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด"
+}
+
+# ... (FastAPI app setup and other endpoints remain the same) ...
 app = FastAPI(title="Company Settings API", version="1.0.0")
 
 # Enable CORS for frontend development
@@ -197,7 +237,7 @@ def upsert_company_forms(company_id: int, payload: FormsUpsert):
 # ---------- Workflow endpoints ----------
 @app.post("/workflow/start")
 def start_workflow(payload: WorkflowStart):
-    """Main workflow to get data from Google Drive and generate an Excel report."""
+    # ... (Existing setup code: logging, get company settings, auth with Drive) ...
     logging.info(f"Workflow started for company_id: {payload.company_id}, month: {payload.month}, year: {payload.year}")
     
     # Get company settings from the database
@@ -237,7 +277,7 @@ def start_workflow(payload: WorkflowStart):
     company_folder_id = folders[0]['id']
     logging.info(f"Found company folder with id: {company_folder_id}")
 
-    # --- Get Data Workflow ---
+    # --- Get Data Workflow (Same as before) ---
     logging.info("Starting Get Data Workflow.")
 
     # Find top-level folders within the company folder
@@ -297,42 +337,70 @@ def start_workflow(payload: WorkflowStart):
 
     # --- Process Data Workflow ---
     logging.info("Starting Process Data Workflow.")
-    # Create a new Excel workbook in memory
     wb = openpyxl.Workbook()
     sheet = wb.active
     sheet.title = "Workflow Result"
-    sheet.append(['Name', 'TB Code', 'File Found'])
-    logging.info("Excel workbook created.")
+    sheet.append(['Name', 'TB Code', 'File Found', 'PDF Actual Amount']) # Add new header
+    logging.info("Excel workbook created with new header.")
 
-    # Add bank data to the sheet
-    logging.info("Adding bank data to the sheet.")
+    # Add bank data
     for bank in banks:
         bank_name = bank['bank_name']
         tb_code = bank['tb_code']
-        found_file_names = [f['name'] for f in bank_files if bank_name.lower() in f['name'].lower()]
-        sheet.append([bank_name, tb_code, ", ".join(found_file_names)])
+        found_files = [f for f in bank_files if bank_name.lower() in f['name'].lower()]
+        file_names = ", ".join([f['name'] for f in found_files])
+        
+        amount = "N/A"
+        if found_files:
+            amounts = []
+            for f in found_files:
+                request = drive_service.files().get_media(fileId=f['id'])
+                fh = BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+                fh.seek(0)
+                amount_from_pdf = get_amount_from_gemini(fh.getvalue(), PROMPTS["BANK"])
+                amounts.append(amount_from_pdf)
+            amount = ", ".join(amounts)
+            
+        sheet.append([bank_name, tb_code, file_names, amount])
 
-    # Add form data to the sheet
-    logging.info("Adding form data to the sheet.")
+    # Add form data
     form_data_map = {
-        "PND1": (pnd1_files, forms_map.get("PND1", "")),
-        "PND3": (pnd3_files, forms_map.get("PND3", "")),
-        "PND53": (pnd53_files, forms_map.get("PND53", "")),
-        "PP30": (pp30_files, forms_map.get("PP30", "")),
-        "SSO": (sso_files, forms_map.get("SSO", "")),
+        "PND1": (pnd1_files, forms_map.get("PND1", ""), PROMPTS["PND1"]),
+        "PND3": (pnd3_files, forms_map.get("PND3", ""), PROMPTS["PND3"]),
+        "PND53": (pnd53_files, forms_map.get("PND53", ""), PROMPTS["PND53"]),
+        "PP30": (pp30_files, forms_map.get("PP30", ""), PROMPTS["PP30"]), # No prompt for PP30
+        "SSO": (sso_files, forms_map.get("SSO", ""), PROMPTS["SSO"]),
     }
-    for form_name, (files, tb_code) in form_data_map.items():
+
+    for form_name, (files, tb_code, prompt) in form_data_map.items():
         file_names = ", ".join([f['name'] for f in files])
-        sheet.append([form_name, tb_code, file_names])
+        amount = "N/A"
+        if files and prompt != "N/A":
+            amounts = []
+            for f in files:
+                request = drive_service.files().get_media(fileId=f['id'])
+                fh = BytesIO()
+                downloader = MediaIoBaseDownload(fh, request)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+                fh.seek(0)
+                amount_from_pdf = get_amount_from_gemini(fh.getvalue(), prompt)
+                amounts.append(amount_from_pdf)
+            amount = ", ".join(amounts)
+
+        sheet.append([form_name, tb_code, file_names, amount])
+    
     logging.info("Data added to the sheet.")
 
-    # Save the workbook to a byte stream
+    # Save and return workbook
     virtual_workbook = BytesIO()
     wb.save(virtual_workbook)
     virtual_workbook.seek(0)
-    logging.info("Workbook saved to memory.")
-
-    # Return the Excel file as a downloadable response
     filename = f"{company_name}_{payload.year}_{payload.month}_workflow.xlsx"
     logging.info(f"Returning Excel file: {filename}")
     return StreamingResponse(
