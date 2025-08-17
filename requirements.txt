@@ -8,3 +8,5 @@ openpyxl
 google-generativeai
 uvicorn
 gunicorn
+pandas
+xlrd

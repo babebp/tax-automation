@@ -71,3 +71,7 @@ Constraints:
     - Updated the workflow to send PDF file bytes directly to the Gemini `gemini-1.5-pro` model.
     - This removes the local text extraction step, relying on Gemini's multimodal capabilities for more robust text extraction from scanned documents.
     - Corrected the Gemini model name from `gemini-pro` to `gemini-1.5-flash` and subsequently to `gemini-1.5-pro` to resolve API errors and support OCR.
+- **TB Code Amount Integration**:
+    - Added a new "TB Code Amount" column to the final Excel report.
+    - The workflow now searches for a "tb" file in the company's Google Drive.
+    - It reads the TB file and maps the amounts to the corresponding TB codes based on the specified logic (using column 7 or a negative value from column 8).

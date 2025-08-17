@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 import openpyxl
 from dotenv import load_dotenv
 import os
+import pandas as pd
 
 load_dotenv() # Load environment variables from .env file
 
@@ -335,12 +336,27 @@ def start_workflow(payload: WorkflowStart):
         pnd3_files = find_in_pnd_subfolder("PND3")
         pnd53_files = find_in_pnd_subfolder("PND53")
 
+    # Find VAT files
+    vat_folder_name = f"VAT_{payload.year}"
+    logging.info(f"Searching for VAT folder: {vat_folder_name}")
+    vat_folders_query = f"'{company_folder_id}' in parents and name contains '{vat_folder_name}' and mimeType = 'application/vnd.google-apps.folder'"
+    vat_folders = gd.find_files(drive_service, vat_folders_query)
+    vat_files = []
+    if vat_folders:
+        vat_folder_id = vat_folders[0]['id']
+        logging.info(f"VAT folder found with id: {vat_folder_id}, searching for files.")
+        year_short = str(payload.year)[-2:]
+        vat_file_search_term = f"VAT{payload.month}_{year_short}"
+        vat_files_query = f"'{vat_folder_id}' in parents and name contains '{vat_file_search_term}' and mimeType = 'application/vnd.ms-excel'"
+        vat_files = gd.find_files(drive_service, vat_files_query)
+    logging.info(f"Found {len(vat_files)} VAT files: {[f['name'] for f in vat_files]}")
+
     # --- Process Data Workflow ---
     logging.info("Starting Process Data Workflow.")
     wb = openpyxl.Workbook()
     sheet = wb.active
     sheet.title = "Workflow Result"
-    sheet.append(['Name', 'TB Code', 'File Found', 'PDF Actual Amount', 'TB Code Amount']) # Add new header
+    sheet.append(['Name', 'TB Code', 'File Found', 'PDF Actual Amount', 'TB Code Amount', 'Excel Actual Column']) # Add new header
     logging.info("Excel workbook created with new header.")
 
     # Find and read the TB file
@@ -373,6 +389,41 @@ def start_workflow(payload: WorkflowStart):
     else:
         logging.warning("TB file not found.")
 
+    # Process VAT files for "Excel Actual Column"
+    vat_amounts = {}
+    form_mapping = {
+        "ภงด.1": "PND1",
+        "ภงด.3": "PND3",
+        "ภงด.53": "PND53",
+        "ภพ.30": "PP30",
+    }
+    if vat_files:
+        for vat_file in vat_files:
+            vat_file_id = vat_file['id']
+            logging.info(f"Processing VAT file: {vat_file['name']} (id: {vat_file_id})")
+            request = drive_service.files().get_media(fileId=vat_file_id)
+            fh = BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+            fh.seek(0)
+            df = pd.read_excel(fh, engine='xlrd', header=None)
+            for index, row in df.iterrows():
+                if len(row) > 3:
+                    cell_value = str(row.iloc[1])
+                    for key, form_name in form_mapping.items():
+                        if key in cell_value:
+                            amount_cell = row.iloc[3]
+                            amount = 0
+                            if amount_cell != "-" and amount_cell is not None:
+                                try:
+                                    amount = float(amount_cell)
+                                except (ValueError, TypeError):
+                                    amount = "Invalid Value"
+                            vat_amounts[form_name] = amount
+                            break # Move to next row once a match is found
+
     # Add bank data
     for bank in banks:
         bank_name = bank['bank_name']
@@ -396,7 +447,7 @@ def start_workflow(payload: WorkflowStart):
             amount = ", ".join(amounts)
             
         tb_amount = tb_data.get(str(tb_code), "Not Found")
-        sheet.append([bank_name, tb_code, file_names, amount, tb_amount])
+        sheet.append([bank_name, tb_code, file_names, amount, tb_amount, "N/A"])
 
     # Add form data
     form_data_map = {
@@ -425,7 +476,8 @@ def start_workflow(payload: WorkflowStart):
             amount = ", ".join(amounts)
 
         tb_amount = tb_data.get(str(tb_code), "Not Found")
-        sheet.append([form_name, tb_code, file_names, amount, tb_amount])
+        excel_actual_amount = vat_amounts.get(form_name, "N/A")
+        sheet.append([form_name, tb_code, file_names, amount, tb_amount, excel_actual_amount])
     
     logging.info("Data added to the sheet.")
 
