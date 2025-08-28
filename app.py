@@ -1,6 +1,9 @@
 # streamlit_app.py
 import streamlit as st
 import requests
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 # Base URL for the FastAPI backend
 API_BASE = st.secrets.get("API_BASE", "http://localhost:8000")
@@ -10,10 +13,10 @@ st.set_page_config(page_title="Company Settings", layout="wide")
 st.title("Company Settings & Forms")
 
 # Create tabs for different sections of the app
-tab1, tab2, tab3 = st.tabs(["Settings", "Company Config", "Workflow"])
+tab1, tab2, tab3, tab4 = st.tabs(["Settings", "Company Config", "Workflow", "LINE Notification"])
 
 # ---------- Shared helper functions ----------
-def fetch_companies():
+def fetch_companies(): 
     """Fetches the list of companies from the backend."""
     r = requests.get(f"{API_BASE}/companies")
     r.raise_for_status()
@@ -208,4 +211,73 @@ with tab3:
                     st.error(f"An unexpected error occurred: {e}")
     else:
         st.info("ยังไม่มีบริษัทในระบบ — เพิ่มบริษัทก่อนในแท็บ Settings")
+
+# ---------- Tab 4: LINE Notification ----------
+with tab4:
+    st.subheader("ส่งข้อความผ่าน LINE")
+
+    # --- Recipient Management ---
+    with st.expander("จัดการรายชื่อผู้รับ (LINE User ID)"):
+        st.markdown("เพิ่มหรือลบรายชื่อผู้รับข้อความ")
+
+        # Fetch current recipients
+        try:
+            recipients_res = requests.get(f"{API_BASE}/line/recipients")
+            recipients_res.raise_for_status()
+            recipients = recipients_res.json()
+        except Exception as e:
+            st.error(f"ไม่สามารถโหลดรายชื่อผู้รับได้: {e}")
+            recipients = []
+
+        # Display recipients with delete buttons
+        if recipients:
+            for r in recipients:
+                col1, col2 = st.columns([4, 1])
+                col1.text(r['uid'])
+                if col2.button("🗑️ ลบ", key=f"del_recipient_{r['id']}"):
+                    try:
+                        del_res = requests.delete(f"{API_BASE}/line/recipients/{r['id']}")
+                        del_res.raise_for_status()
+                        st.toast("ลบผู้รับสำเร็จ", icon="✅")
+                        st.rerun()
+                    except requests.HTTPError as e:
+                        detail = e.response.json().get("detail", str(e))
+                        st.error(f"ลบไม่สำเร็จ: {detail}")
+
+        # Add new recipient
+        with st.form("add_recipient_form", clear_on_submit=True):
+            new_uid = st.text_input("LINE User ID", placeholder="U123456789...")
+            submitted = st.form_submit_button("➕ เพิ่มผู้รับ")
+            if submitted:
+                if not new_uid.strip():
+                    st.error("กรุณาใส่ User ID")
+                else:
+                    try:
+                        add_res = requests.post(f"{API_BASE}/line/recipients", json={"uid": new_uid.strip()})
+                        add_res.raise_for_status()
+                        st.toast("เพิ่มผู้รับสำเร็จ", icon="✅")
+                        st.rerun()
+                    except requests.HTTPError as e:
+                        detail = e.response.json().get("detail", str(e))
+                        st.error(f"เพิ่มไม่สำเร็จ: {detail}")
+
+    st.divider()
+
+    # --- Send Message ---
+    st.markdown("### ส่งข้อความ")
+    message_text = st.text_area("ข้อความที่จะส่ง:", height=150, placeholder="พิมพ์ข้อความที่นี่...")
+    if st.button("🚀 ส่งข้อความ", type="primary"):
+        if not message_text.strip():
+            st.error("กรุณาพิมพ์ข้อความที่จะส่ง")
+        else:
+            with st.spinner("กำลังส่งข้อความ..."):
+                try:
+                    send_res = requests.post(f"{API_BASE}/line/send_message", json={"message": message_text.strip()})
+                    send_res.raise_for_status()
+                    sent_count = send_res.json().get("sent_count", 0)
+                    st.success(f"ส่งข้อความสำเร็จ ({sent_count} คน)")
+                    st.balloons()
+                except requests.HTTPError as e:
+                    detail = e.response.json().get("detail", str(e))
+                    st.error(f"ส่งข้อความไม่สำเร็จ: {detail}")
 

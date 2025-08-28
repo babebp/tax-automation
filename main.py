@@ -13,6 +13,7 @@ import openpyxl
 from dotenv import load_dotenv
 import os
 import pandas as pd
+import requests
 
 load_dotenv() # Load environment variables from .env file
 
@@ -32,6 +33,10 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 else:
     logging.warning("GEMINI_API_KEY environment variable not set. PDF processing will fail.")
+
+# Configure LINE API
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_API_URL = "https://api.line.me/v2/bot/message/push"
 
 DB_PATH = "app.db"
 
@@ -79,6 +84,13 @@ def init_db():
             FOREIGN KEY(company_id) REFERENCES companies(id) ON DELETE CASCADE
         )
         """)
+        # line_recipients table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS line_recipients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT UNIQUE NOT NULL
+        )
+        """)
 
 # ---------- Pydantic schemas ----------
 class CompanyCreate(BaseModel):
@@ -106,6 +118,16 @@ class WorkflowStart(BaseModel):
     company_id: int
     month: str
     year: int
+
+class LineRecipientCreate(BaseModel):
+    uid: str = Field(..., min_length=1)
+
+class LineRecipient(BaseModel):
+    id: int
+    uid: str
+
+class LineMessage(BaseModel):
+    message: str = Field(..., min_length=1)
 
 # ---------- New Helper Functions for PDF and LLM ----------
 def get_amount_from_gemini(file_content: bytes, prompt: str) -> str:
@@ -234,6 +256,79 @@ def upsert_company_forms(company_id: int, payload: FormsUpsert):
             tb_code = tb_code.strip()
             conn.execute("INSERT INTO company_forms(company_id, form_type, tb_code) VALUES (?, ?, ?) ON CONFLICT(company_id, form_type) DO UPDATE SET tb_code=excluded.tb_code", (company_id, form_type, tb_code))
         return {"ok": True}
+
+# ---------- LINE Notify endpoints ----------
+@app.get("/line/recipients", response_model=List[LineRecipient])
+def list_line_recipients():
+    """Lists all LINE recipients."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, uid FROM line_recipients ORDER BY id").fetchall()
+        return [LineRecipient(id=r["id"], uid=r["uid"]) for r in rows]
+
+@app.post("/line/recipients", response_model=LineRecipient)
+def add_line_recipient(payload: LineRecipientCreate):
+    """Adds a new LINE recipient."""
+    with get_conn() as conn:
+        try:
+            cur = conn.execute("INSERT INTO line_recipients(uid) VALUES (?)", (payload.uid.strip(),))
+            rid = cur.lastrowid
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="Recipient UID already exists.")
+        row = conn.execute("SELECT id, uid FROM line_recipients WHERE id = ?", (rid,)).fetchone()
+        return LineRecipient(id=row["id"], uid=row["uid"])
+
+@app.delete("/line/recipients/{recipient_id}")
+def delete_line_recipient(recipient_id: int):
+    """Deletes a LINE recipient."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT id FROM line_recipients WHERE id = ?", (recipient_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Recipient not found.")
+        conn.execute("DELETE FROM line_recipients WHERE id = ?", (recipient_id,))
+        return {"ok": True}
+
+@app.post("/line/send_message")
+def send_line_message(payload: LineMessage):
+    """Sends a message to all registered LINE recipients."""
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        logging.error("LINE_CHANNEL_ACCESS_TOKEN is not set.")
+        raise HTTPException(status_code=500, detail="LINE API is not configured on the server.")
+
+    with get_conn() as conn:
+        rows = conn.execute("SELECT uid FROM line_recipients").fetchall()
+        uids = [r["uid"] for r in rows]
+
+    if not uids:
+        raise HTTPException(status_code=400, detail="No recipients configured.")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+    }
+    
+    error_details = []
+    success_count = 0
+
+    for uid in uids:
+        body = {
+            "to": uid,
+            "messages": [{"type": "text", "text": payload.message}]
+        }
+        try:
+            response = requests.post(LINE_API_URL, headers=headers, json=body)
+            response.raise_for_status()
+            success_count += 1
+        except requests.HTTPError as e:
+            logging.error(f"Failed to send message to {uid}: {e.response.text}")
+            error_details.append(f"Failed for UID {uid}: {e.response.status_code}")
+    
+    if error_details:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Sent {success_count}/{len(uids)} messages. Errors: {', '.join(error_details)}"
+        )
+
+    return {"ok": True, "sent_count": success_count}
 
 # ---------- Workflow endpoints ----------
 @app.post("/workflow/start")
