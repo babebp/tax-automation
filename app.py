@@ -13,7 +13,7 @@ st.set_page_config(page_title="Company Settings", layout="wide")
 st.title("Company Settings & Forms")
 
 # Create tabs for different sections of the app
-tab1, tab2, tab3, tab4 = st.tabs(["Settings", "Company Config", "Workflow", "LINE Notification"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Settings", "Company Config", "Workflow", "LINE Notification", "Reconcile"])
 
 # ---------- Shared helper functions ----------
 def fetch_companies(): 
@@ -278,6 +278,58 @@ with tab4:
                     st.success(f"ส่งข้อความสำเร็จ ({sent_count} คน)")
                     st.balloons()
                 except requests.HTTPError as e:
-                    detail = e.response.json().get("detail", str(e))
-                    st.error(f"ส่งข้อความไม่สำเร็จ: {detail}")
+                    pass
+                    # ---------- Tab 5: Reconcile ----------
+with tab5:
+    st.subheader("Reconcile")
+
+    companies = []
+    try:
+        companies = fetch_companies()
+    except Exception as e:
+        st.error(f"โหลดรายชื่อบริษัทไม่สำเร็จ: {e}")
+
+    if companies:
+        company_names = [c["name"] for c in companies]
+        selected_name = st.selectbox("เลือก Company", options=company_names, key="reconcile_company_select")
+        selected_company = next(c for c in companies if c["name"] == selected_name)
+        cid = selected_company["id"]
+
+        if st.button("Start Reconcile", type="primary"):
+            with st.spinner(f"Processing reconcile for {selected_name}..."):
+                try:
+                    # POST request to start the reconcile and receive a file
+                    r = requests.post(f"{API_BASE}/reconcile/start", json={
+                        "company_id": cid,
+                    }, stream=True)
+                    r.raise_for_status()
+                    
+                    # Extract filename from response headers
+                    content_disposition = r.headers.get('content-disposition')
+                    filename = "reconcile_result.xlsx" # Default filename
+                    if content_disposition:
+                        parts = content_disposition.split(';')
+                        for part in parts:
+                            if 'filename=' in part:
+                                filename = part.split('=')[1].strip('"')
+
+                    st.success("✅ Reconcile complete!")
+                    # Display download button for the generated Excel file
+                    st.download_button(
+                        label="📥 Download Excel File",
+                        data=r.content,
+                        file_name=filename,
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                    )
+
+                except requests.HTTPError as e:
+                    try:
+                        detail = e.response.json().get("detail", str(e))
+                    except:
+                        detail = str(e)
+                    st.error(f"Reconcile failed: {detail}")
+                except Exception as e:
+                    st.error(f"An unexpected error occurred: {e}")
+    else:
+        st.info("ยังไม่มีบริษัทในระบบ — เพิ่มบริษัทก่อนในแท็บ Settings")
 

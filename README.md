@@ -75,3 +75,11 @@ Constraints:
     - Added a new "TB Code Amount" column to the final Excel report.
     - The workflow now searches for a "tb" file in the company's Google Drive.
     - It reads the TB file and maps the amounts to the corresponding TB codes based on the specified logic (using column 7 or a negative value from column 8).
+
+---
+
+### Gemini Work Done (Reconcile)
+- **Reconcile Tab**: Added a new "Reconcile" tab to the Streamlit frontend.
+- **Reconcile Backend**: Created a new `/reconcile/start` endpoint in the FastAPI backend.
+- **TB Sub-sheet**: Implemented the logic to create the "TB" sub-sheet with data from the "tb" file in Google Drive and added all the required formulas and static values.
+- **TB Sub-sheet Verification**: Reviewed and verified the implementation of the "TB" sub-sheet generation, ensuring it aligns with the requirements in `RECONCILE.md`.

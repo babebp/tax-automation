@@ -119,6 +119,9 @@ class WorkflowStart(BaseModel):
     month: str
     year: int
 
+class ReconcileStart(BaseModel):
+    company_id: int
+
 class LineRecipientCreate(BaseModel):
     uid: str = Field(..., min_length=1)
 
@@ -581,6 +584,195 @@ def start_workflow(payload: WorkflowStart):
     wb.save(virtual_workbook)
     virtual_workbook.seek(0)
     filename = f"{company_name}_{payload.year}_{payload.month}_workflow.xlsx"
+    logging.info(f"Returning Excel file: {filename}")
+    return StreamingResponse(
+        virtual_workbook,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+    )
+
+# ---------- Reconcile endpoints ----------
+@app.post("/reconcile/start")
+def start_reconcile(payload: ReconcileStart):
+    logging.info(f"Reconcile started for company_id: {payload.company_id}")
+    
+    # Get company name
+    with get_conn() as conn:
+        c = conn.execute("SELECT name FROM companies WHERE id = ?", (payload.company_id,)).fetchone()
+        if not c:
+            logging.error(f"Company with id {payload.company_id} not found.")
+            raise HTTPException(status_code=404, detail="Company not found.")
+        company_name = c["name"]
+
+    # Authenticate with Google Drive
+    logging.info("Authenticating with Google Drive.")
+    try:
+        drive_service = gd.get_drive_service()
+    except FileNotFoundError as e:
+        logging.error(f"Credential file not found: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logging.error(f"Google Drive authentication failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Google Drive authentication failed: {e}")
+    logging.info("Google Drive authentication successful.")
+
+    # Find the company's main folder in Google Drive
+    folder_search_term = f"{company_name}"
+    logging.info(f"Searching for company folder with term: {folder_search_term}")
+    query = f"name contains '{folder_search_term}' and mimeType = 'application/vnd.google-apps.folder'"
+    folders = gd.find_files(drive_service, query)
+    if not folders:
+        logging.error(f"No Google Drive folder found for '{folder_search_term}'")
+        raise HTTPException(status_code=404, detail=f"No Google Drive folder found for '{folder_search_term}'")
+    company_folder_id = folders[0]['id']
+    logging.info(f"Found company folder with id: {company_folder_id}")
+
+    # Find and read the TB file
+    tb_files_query = f"'{company_folder_id}' in parents and name contains 'tb' and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
+    tb_files = gd.find_files(drive_service, tb_files_query)
+    if not tb_files:
+        logging.error("TB file not found.")
+        raise HTTPException(status_code=404, detail="TB file not found.")
+
+    tb_file_id = tb_files[0]['id']
+    logging.info(f"TB file found with id: {tb_file_id}")
+    request = drive_service.files().get_media(fileId=tb_file_id)
+    fh = BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        status, done = downloader.next_chunk()
+    fh.seek(0)
+    tb_wb = openpyxl.load_workbook(fh)
+    tb_sheet = tb_wb.active
+
+    # Create a new workbook for reconcile result
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "TB"
+
+    # Copy data from tb_sheet to the new sheet, excluding the last row
+    for row_index, row in enumerate(tb_sheet.iter_rows(max_row=tb_sheet.max_row - 1), start=1):
+        for col_index, cell in enumerate(row[:8], start=1):
+            sheet.cell(row=row_index + 5, column=col_index, value=cell.value)
+
+    # Add formulas and static values
+    # Step 1.3
+    for col in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O']:
+        sheet[f'{col}5'] = f'=SUBTOTAL(9,{col}8:{col}{sheet.max_row})'
+
+    # Step 1.4
+    sheet.merge_cells('I6:J6')
+    sheet['I6'] = 'ปรับปรุง'
+
+    # Step 1.5
+    sheet['I7'] = 'เดบิท'
+
+    # Step 1.6
+    sheet['J7'] = 'เครดิต'
+
+    # Step 1.7
+    sheet.merge_cells('K6:K7')
+    sheet['K6'] = 'Net'
+
+    # Step 1.8
+    sheet['K4'] = 'กำไร'
+
+    # Step 1.9
+    for row in range(8, sheet.max_row + 1):
+        sheet[f'K{row}'] = f'=G{row}+I{row}-H{row}-J{row}'
+
+    # Step 1.10
+    sheet['L3'] = '=+L5+L4'
+
+    # Step 1.11
+    sheet['L4'] = '=+M5-L5'
+
+    # Step 1.12
+    sheet['M3'] = '=+M5+M4'
+
+    # Step 1.13
+    sheet.merge_cells('L6:M6')
+    sheet['L6'] = 'งบกำไรขาดทุน'
+
+    # Step 1.14
+    sheet['L7'] = 'เดบิท'
+
+    # Step 1.15
+    sheet['M7'] = 'เครดิต'
+
+    # Step 1.16
+    sheet['N3'] = '=+N5+N4'
+
+    # Step 1.17
+    sheet['O2'] = '=+N3-O3'
+
+    # Step 1.18
+    sheet['O3'] = '=+O5+O4'
+
+    # Step 1.19
+    sheet['O4'] = '=+L4'
+
+    # Step 1.20 & 1.21
+    for row in range(8, sheet.max_row + 1):
+        a_val = sheet[f'A{row}'].value
+        if a_val and str(a_val).startswith(('4', '5')):
+            sheet[f'L{row}'] = f'=IF(K{row}>0,K{row},0)'
+            sheet[f'M{row}'] = f'=IF(K{row}<0,-K{row},0)'
+
+    # Step 1.22 & 1.23
+    for row in range(8, sheet.max_row + 1):
+        a_val = sheet[f'A{row}'].value
+        if a_val and str(a_val).startswith(('1', '2', '3')):
+            sheet[f'N{row}'] = f'=IF(K{row}>0,K{row},0)'
+            sheet[f'O{row}'] = f'=IF(K{row}<0,-K{row},0)'
+    
+    # Step 1.24
+    sheet['M2'] = '=+L3-M3'
+
+    # Step 1.25
+    sheet.merge_cells('N6:O6')
+    sheet['N6'] = 'งบแสดงฐานะการเงิน'
+
+    # Step 1.26
+    sheet['N7'] = 'เดบิท'
+
+    # Step 1.27
+    sheet['O7'] = 'เครดิต'
+
+    # Step 1.28
+    sheet['A1'] = 'ชื่อบริษัท'
+    sheet['B1'] = company_name
+
+    # Step 1.29
+    sheet['A2'] = 'งบทดลอง ณ วันที่'
+
+    # Step 1.30
+    sheet['A3'] = 'เลขที่บัญชีจาก'
+
+    # Step 1.31
+    sheet['A4'] = 'วันที่จาก'
+
+    # Step 1.32
+    sheet['A5'] = 'เลือกแผนก'
+
+    # Step 1.33
+    sheet['B3'] = 'xxxxxx - xxxxxx'
+
+    # Step 1.34
+    sheet['B5'] = '* รวมบัญชียอดเป็น 0 N'
+
+    # Step 1.35
+    sheet['B4'] = '_ ถึง _'
+
+    # Step 1.36
+    sheet['B2'] = 'xx มกราคม xxx'
+
+    # Save and return workbook
+    virtual_workbook = BytesIO()
+    wb.save(virtual_workbook)
+    virtual_workbook.seek(0)
+    filename = f"{company_name}_reconcile.xlsx"
     logging.info(f"Returning Excel file: {filename}")
     return StreamingResponse(
         virtual_workbook,
