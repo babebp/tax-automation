@@ -59,3 +59,27 @@ C5-C16 = List month in Thai (มกราคม - ธันวาคม)
 3.3
 D5-D16 = Read from GL sub sheet 41210
 
+4. Each TB Code
+4.1 From company directory in google drive (as we selected for example "0.Com1_TestWorkFlowAutomation_2025"); Read file xlsx that filename contain "gl";
+4.2 Loop column A each row, to find these
+- If value is "ลำดับที่" then go back one row and see if it start with "1" or "2", if so then split the text and get first part it will be number like this "xxxxxx"
+- get from the number part's row to the next empty cell, for example
+
+"xxxxxx" (from here)
+ลำดับที่
+1
+2
+3
+4
+5
+6
+(to here)
+
+"yyyyyy" (from here)
+ลำดับที่
+1
+2
+3
+(to here)
+
+- check if there're sub sheet that is this number, if exist then append to that sub sheet, if not then create new sheet with this number "xxxxxx" and put the content inside

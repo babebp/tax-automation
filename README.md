@@ -83,3 +83,4 @@ Constraints:
 - **Reconcile Backend**: Created a new `/reconcile/start` endpoint in the FastAPI backend.
 - **TB Sub-sheet**: Implemented the logic to create the "TB" sub-sheet with data from the "tb" file in Google Drive and added all the required formulas and static values.
 - **TB Sub-sheet Verification**: Reviewed and verified the implementation of the "TB" sub-sheet generation, ensuring it aligns with the requirements in `RECONCILE.md`.
+- **GL and TB Code Sub-sheets**: Implemented the logic to create the "GL" sub-sheet and individual sub-sheets for each TB Code found in the "gl" file, as per Step 4 of `RECONCILE.md`.

@@ -768,6 +768,69 @@ def start_reconcile(payload: ReconcileStart):
     # Step 1.36
     sheet['B2'] = 'xx มกราคม xxx'
 
+    # Step 4: Create sub-sheets for each TB Code from the GL file
+    # Find and read the GL file
+    gl_files_query = f"'{company_folder_id}' in parents and name contains 'gl' and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
+    gl_files = gd.find_files(drive_service, gl_files_query)
+    if gl_files:
+        gl_file_id = gl_files[0]['id']
+        logging.info(f"GL file found with id: {gl_file_id}")
+        request = drive_service.files().get_media(fileId=gl_file_id)
+        fh = BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        fh.seek(0)
+        gl_wb = openpyxl.load_workbook(fh)
+        gl_sheet = gl_wb.active
+
+        # Create GL sheet and copy all data
+        gl_ws = wb.create_sheet(title="GL")
+        for row in gl_sheet.iter_rows():
+            gl_ws.append([cell.value for cell in row])
+
+        # Process GL data to create TB Code sub-sheets
+        data_rows = list(gl_sheet.iter_rows(values_only=True))
+        i = 0
+        while i < len(data_rows):
+            row = data_rows[i]
+            if row and row[0] and "ลำดับที่" in str(row[0]):
+                if i > 0:
+                    prev_row = data_rows[i-1]
+                    account_info = str(prev_row[0]) if prev_row and prev_row[0] else ""
+                    if account_info.startswith(('1', '2')):
+                        account_number = account_info.split()[0]
+                        
+                        # Extract data block starting from the "ลำดับที่" row
+                        account_data_block = []
+                        block_end_index = i
+                        for j in range(i, len(data_rows)):
+                            current_block_row = data_rows[j]
+                            account_data_block.append(current_block_row)
+                            block_end_index = j
+                            # The block ends with a row where the first cell is empty or None
+                            if not current_block_row or not current_block_row[0]:
+                                break
+                        
+                        # Get or create the target worksheet
+                        if account_number in wb.sheetnames:
+                            ws = wb[account_number]
+                        else:
+                            ws = wb.create_sheet(title=account_number)
+                        
+                        # Append the data block
+                        for data_row in account_data_block:
+                            ws.append(data_row)
+                        
+                        # Add an extra empty row for spacing
+                        ws.append([])
+                        
+                        # Update the main loop index to continue after the processed block
+                        i = block_end_index + 1
+                        continue
+            i += 1
+
     # Save and return workbook
     virtual_workbook = BytesIO()
     wb.save(virtual_workbook)
