@@ -1,4 +1,5 @@
 from io import BytesIO
+from copy import copy
 from googleapiclient.http import MediaIoBaseDownload
 import google.generativeai as genai 
 import logging
@@ -24,6 +25,13 @@ import google_drive as gd
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     handlers=[logging.FileHandler("app.log"), logging.StreamHandler()])
+
+try:
+    from openpyxl.formula.translate import Translator
+    CAN_TRANSLATE = True
+except ImportError:
+    CAN_TRANSLATE = False
+    logging.warning("Could not import openpyxl.formula.translate.Translator. Formulas will be copied without adjusting references.")
 
 # Configure Gemini API
 # IMPORTANT: The API key should be set in your environment or a secure config
@@ -88,7 +96,18 @@ def init_db():
         cur.execute("""
         CREATE TABLE IF NOT EXISTS line_recipients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid TEXT UNIQUE NOT NULL
+            channel_id INTEGER NOT NULL,
+            uid TEXT NOT NULL,
+            UNIQUE(channel_id, uid),
+            FOREIGN KEY(channel_id) REFERENCES line_channels(id) ON DELETE CASCADE
+        )
+        """)
+        # line_channels table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS line_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            token TEXT NOT NULL
         )
         """)
 
@@ -123,13 +142,30 @@ class ReconcileStart(BaseModel):
     company_id: int
 
 class LineRecipientCreate(BaseModel):
+    channel_id: int
     uid: str = Field(..., min_length=1)
 
 class LineRecipient(BaseModel):
     id: int
+    channel_id: int
     uid: str
 
+class LineRecipientDetail(BaseModel):
+    id: int
+    uid: str
+    displayName: str
+
+class LineChannelCreate(BaseModel):
+    name: str = Field(..., min_length=1)
+    token: str = Field(..., min_length=1)
+
+class LineChannel(BaseModel):
+    id: int
+    name: str
+    token: str
+
 class LineMessage(BaseModel):
+    channel_id: int
     message: str = Field(..., min_length=1)
 
 # ---------- New Helper Functions for PDF and LLM ----------
@@ -261,24 +297,23 @@ def upsert_company_forms(company_id: int, payload: FormsUpsert):
         return {"ok": True}
 
 # ---------- LINE Notify endpoints ----------
-@app.get("/line/recipients", response_model=List[LineRecipient])
-def list_line_recipients():
-    """Lists all LINE recipients."""
-    with get_conn() as conn:
-        rows = conn.execute("SELECT id, uid FROM line_recipients ORDER BY id").fetchall()
-        return [LineRecipient(id=r["id"], uid=r["uid"]) for r in rows]
-
 @app.post("/line/recipients", response_model=LineRecipient)
 def add_line_recipient(payload: LineRecipientCreate):
-    """Adds a new LINE recipient."""
+    """Adds a new LINE recipient to a specific channel."""
     with get_conn() as conn:
+        # Check if channel exists
+        channel = conn.execute("SELECT id FROM line_channels WHERE id = ?", (payload.channel_id,)).fetchone()
+        if not channel:
+            raise HTTPException(status_code=404, detail="Channel not found.")
+        
         try:
-            cur = conn.execute("INSERT INTO line_recipients(uid) VALUES (?)", (payload.uid.strip(),))
+            cur = conn.execute("INSERT INTO line_recipients(channel_id, uid) VALUES (?, ?)", (payload.channel_id, payload.uid.strip()))
             rid = cur.lastrowid
         except sqlite3.IntegrityError:
-            raise HTTPException(status_code=400, detail="Recipient UID already exists.")
-        row = conn.execute("SELECT id, uid FROM line_recipients WHERE id = ?", (rid,)).fetchone()
-        return LineRecipient(id=row["id"], uid=row["uid"])
+            raise HTTPException(status_code=400, detail="Recipient UID already exists for this channel.")
+        
+        row = conn.execute("SELECT id, channel_id, uid FROM line_recipients WHERE id = ?", (rid,)).fetchone()
+        return LineRecipient(id=row["id"], channel_id=row["channel_id"], uid=row["uid"])
 
 @app.delete("/line/recipients/{recipient_id}")
 def delete_line_recipient(recipient_id: int):
@@ -290,15 +325,86 @@ def delete_line_recipient(recipient_id: int):
         conn.execute("DELETE FROM line_recipients WHERE id = ?", (recipient_id,))
         return {"ok": True}
 
+@app.get("/line/channels/{channel_id}/recipients", response_model=List[LineRecipientDetail])
+def get_recipient_details(channel_id: int):
+    """Gets details for all recipients using a specific channel to fetch profiles."""
+    with get_conn() as conn:
+        channel_row = conn.execute("SELECT token FROM line_channels WHERE id = ?", (channel_id,)).fetchone()
+        if not channel_row:
+            raise HTTPException(status_code=404, detail="LINE channel not found.")
+        access_token = channel_row["token"]
+
+        recipient_rows = conn.execute("SELECT id, uid FROM line_recipients WHERE channel_id = ?", (channel_id,)).fetchall()
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+    detailed_recipients = []
+
+    for r in recipient_rows:
+        uid = r["uid"]
+        profile_url = f"https://api.line.me/v2/bot/profile/{uid}"
+        display_name = "(Profile not found)"
+        try:
+            res = requests.get(profile_url, headers=headers, timeout=5) # Add 5-second timeout
+            res.raise_for_status()
+            display_name = res.json().get("displayName", "(Name not available)")
+        except requests.Timeout:
+            logging.warning(f"Timeout while fetching profile for UID {uid}")
+            display_name = "(Profile fetch timed out)"
+        except requests.HTTPError as e:
+            logging.warning(f"Could not fetch profile for UID {uid}: {e.response.text}")
+        except Exception as e:
+            logging.error(f"An unexpected error occurred while fetching profile for UID {uid}: {e}")
+        
+        detailed_recipients.append(
+            LineRecipientDetail(id=r["id"], uid=uid, displayName=display_name)
+        )
+    
+    return detailed_recipients
+
+
+# ---------- LINE Channel endpoints ----------
+@app.get("/line/channels", response_model=List[LineChannel])
+def list_line_channels():
+    """Lists all LINE channels."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, name, token FROM line_channels ORDER BY name").fetchall()
+        return [LineChannel(id=r["id"], name=r["name"], token=r["token"]) for r in rows]
+
+@app.post("/line/channels", response_model=LineChannel)
+def add_line_channel(payload: LineChannelCreate):
+    """Adds a new LINE channel."""
+    with get_conn() as conn:
+        try:
+            cur = conn.execute("INSERT INTO line_channels(name, token) VALUES (?, ?)", (payload.name.strip(), payload.token.strip()))
+            cid = cur.lastrowid
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="Channel name already exists.")
+        row = conn.execute("SELECT id, name, token FROM line_channels WHERE id = ?", (cid,)).fetchone()
+        return LineChannel(id=row["id"], name=row["name"], token=row["token"])
+
+@app.delete("/line/channels/{channel_id}")
+def delete_line_channel(channel_id: int):
+    """Deletes a LINE channel."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT id FROM line_channels WHERE id = ?", (channel_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Channel not found.")
+        conn.execute("DELETE FROM line_channels WHERE id = ?", (channel_id,))
+        return {"ok": True}
+
+
 @app.post("/line/send_message")
 def send_line_message(payload: LineMessage):
-    """Sends a message to all registered LINE recipients."""
-    if not LINE_CHANNEL_ACCESS_TOKEN:
-        logging.error("LINE_CHANNEL_ACCESS_TOKEN is not set.")
-        raise HTTPException(status_code=500, detail="LINE API is not configured on the server.")
-
+    """Sends a message to all registered LINE recipients using a specific channel."""
     with get_conn() as conn:
-        rows = conn.execute("SELECT uid FROM line_recipients").fetchall()
+        # Get the channel's access token
+        channel_row = conn.execute("SELECT token FROM line_channels WHERE id = ?", (payload.channel_id,)).fetchone()
+        if not channel_row:
+            raise HTTPException(status_code=404, detail="LINE channel not found.")
+        access_token = channel_row["token"]
+
+        # Get recipient UIDs for the specific channel
+        rows = conn.execute("SELECT uid FROM line_recipients WHERE channel_id = ?", (payload.channel_id,)).fetchall()
         uids = [r["uid"] for r in rows]
 
     if not uids:
@@ -306,7 +412,7 @@ def send_line_message(payload: LineMessage):
 
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+        "Authorization": f"Bearer {access_token}"
     }
     
     error_details = []
@@ -454,7 +560,7 @@ def start_workflow(payload: WorkflowStart):
     wb = openpyxl.Workbook()
     sheet = wb.active
     sheet.title = "Workflow Result"
-    sheet.append(['Name', 'TB Code', 'File Found', 'PDF Actual Amount', 'TB Code Amount', 'Excel Actual Column']) # Add new header
+    sheet.append(['Name', 'TB Code', 'File Found', 'PDF Actual Amount', 'TB Code Amount', 'Excel Actual Column', 'Result 1', 'Result 2']) # Add new header
     logging.info("Excel workbook created with new header.")
 
     # Find and read the TB file
@@ -547,6 +653,19 @@ def start_workflow(payload: WorkflowStart):
         tb_amount = tb_data.get(str(tb_code), "Not Found")
         sheet.append([bank_name, tb_code, file_names, amount, tb_amount, "N/A"])
 
+        # Add formulas for result columns
+        row_num = sheet.max_row
+        tb_code_str = str(tb_code)
+        if tb_code_str.startswith('1'):
+            sheet[f'G{row_num}'] = f'=IF(D{row_num}=E{row_num}, "Correct", "Incorrect")'
+            sheet[f'H{row_num}'] = "N/A"
+        elif tb_code_str.startswith('2'):
+            sheet[f'G{row_num}'] = f'=IF(D{row_num}=-E{row_num}, "Correct", "Incorrect")'
+            sheet[f'H{row_num}'] = "N/A" # No Excel Actual Column for banks
+        else:
+            sheet[f'G{row_num}'] = "N/A"
+            sheet[f'H{row_num}'] = "N/A"
+
     # Add form data
     form_data_map = {
         "PND1": (pnd1_files, forms_map.get("PND1", ""), PROMPTS.get("PND1")),
@@ -576,6 +695,19 @@ def start_workflow(payload: WorkflowStart):
         tb_amount = tb_data.get(str(tb_code), "Not Found")
         excel_actual_amount = vat_amounts.get(form_name, "N/A")
         sheet.append([form_name, tb_code, file_names, amount, tb_amount, excel_actual_amount])
+
+        # Add formulas for result columns
+        row_num = sheet.max_row
+        tb_code_str = str(tb_code)
+        if tb_code_str.startswith('1'):
+            sheet[f'G{row_num}'] = f'=IF(D{row_num}=E{row_num}, "Correct", "Incorrect")'
+            sheet[f'H{row_num}'] = "N/A"
+        elif tb_code_str.startswith('2'):
+            sheet[f'G{row_num}'] = f'=IF(D{row_num}=-E{row_num}, "Correct", "Incorrect")'
+            sheet[f'H{row_num}'] = f'=IF(-E{row_num}=F{row_num}, "Correct", "Incorrect")'
+        else:
+            sheet[f'G{row_num}'] = "N/A"
+            sheet[f'H{row_num}'] = "N/A"
     
     logging.info("Data added to the sheet.")
 
@@ -782,13 +914,14 @@ def start_reconcile(payload: ReconcileStart):
         while not done:
             status, done = downloader.next_chunk()
         fh.seek(0)
-        gl_wb = openpyxl.load_workbook(fh)
+        # Load the workbook in data_only mode to get cell values instead of formulas
+        gl_wb = openpyxl.load_workbook(fh, data_only=True)
         gl_sheet = gl_wb.active
 
         # Create GL sheet and copy all data
         gl_ws = wb.create_sheet(title="GL")
-        for row in gl_sheet.iter_rows():
-            gl_ws.append([cell.value for cell in row])
+        for row in gl_sheet.iter_rows(values_only=True):
+            gl_ws.append(row)
 
         # Process GL data to create TB Code sub-sheets
         data_rows = list(gl_sheet.iter_rows(values_only=True))
