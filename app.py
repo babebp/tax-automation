@@ -8,12 +8,12 @@ load_dotenv(override=True)
 # Base URL for the FastAPI backend
 API_BASE = st.secrets.get("API_BASE", "http://localhost:8000")
 
-st.set_page_config(page_title="Company Settings", layout="wide")
+st.set_page_config(page_title="Tax Automation", layout="wide")
 
-st.title("Company Settings & Forms")
+st.title("Tax Automation")
 
 # Create tabs for different sections of the app
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Settings", "Company Config", "Workflow", "LINE Notification", "Reconcile"])
+tab1, tab2, tab3, tab4 = st.tabs(["Settings", "Company Config", "Workflow", "Reconcile"])
 
 # ---------- Shared helper functions ----------
 def fetch_companies(): 
@@ -67,6 +67,105 @@ with tab2:
         selected_name = st.selectbox("เลือก Company", options=company_names, key="settings_company_select")
         selected_company = next(c for c in companies if c["name"] == selected_name)
         cid = selected_company["id"]
+
+        st.divider()
+
+        # --- Google Drive Folder Selection ---
+        st.subheader("Google Drive Folder")
+        folder_name = selected_company.get("google_drive_folder_name") or "ยังไม่ได้เลือก"
+        st.info(f"Folder ที่เลือกไว้: **{folder_name}**")
+
+        # Initialize session state for managing the folder selection UI
+        if 'show_folder_selection' not in st.session_state:
+            st.session_state.show_folder_selection = False
+        
+        # Persist the selected company ID in session state to avoid issues across reruns
+        st.session_state.selected_company_id_for_folder = cid
+
+        if st.button("เปลี่ยน Folder"):
+            st.session_state.show_folder_selection = not st.session_state.show_folder_selection
+
+        if st.session_state.show_folder_selection:
+            try:
+                with st.spinner("กำลังโหลดรายชื่อ Folder..."):
+                    folders_res = requests.get(f"{API_BASE}/google-drive/folders")
+                    folders_res.raise_for_status()
+                    drive_folders = folders_res.json()
+                
+                folder_options = {f["name"]: f["id"] for f in drive_folders}
+                
+                current_folder_name = selected_company.get("google_drive_folder_name")
+                folder_names = list(folder_options.keys())
+                try:
+                    current_index = folder_names.index(current_folder_name) if current_folder_name in folder_names else 0
+                except ValueError:
+                    current_index = 0
+
+                selected_folder_name = st.selectbox(
+                    "เลือก Folder จาก Google Drive", 
+                    options=folder_names,
+                    index=current_index
+                )
+
+                col1, col2, _ = st.columns([1, 1, 4])
+                with col1:
+                    if st.button("💾 บันทึก", type="primary"):
+                        selected_folder_id = folder_options[selected_folder_name]
+                        # Use the company ID from session state
+                        company_id_to_update = st.session_state.selected_company_id_for_folder
+                        update_res = requests.put(
+                            f"{API_BASE}/companies/{company_id_to_update}/google-drive-folder",
+                            json={"google_drive_folder_id": selected_folder_id, "google_drive_folder_name": selected_folder_name}
+                        )
+                        update_res.raise_for_status()
+                        st.success(f"เลือก Folder '{selected_folder_name}' เรียบร้อยแล้ว")
+                        st.session_state.show_folder_selection = False
+                        st.rerun()
+                with col2:
+                    if st.button("ยกเลิก"):
+                        st.session_state.show_folder_selection = False
+                        st.rerun()
+
+            except Exception as e:
+                st.error(f"ไม่สามารถโหลดรายชื่อ Folder ได้: {e}")
+                st.session_state.show_folder_selection = False
+        
+        st.divider()
+
+        # --- Edit and Delete Company ---
+        with st.expander("จัดการ Company"):
+            # Edit Company Name
+            st.markdown("**แก้ไขชื่อ Company**")
+            new_name = st.text_input("New company name", value=selected_company["name"], key=f"edit_name_{cid}")
+            if st.button("💾 บันทึกชื่อใหม่", key=f"save_name_{cid}"):
+                if not new_name.strip():
+                    st.error("ชื่อบริษัทห้ามว่างเปล่า")
+                else:
+                    try:
+                        r = requests.put(f"{API_BASE}/companies/{cid}", json={"name": new_name.strip()})
+                        r.raise_for_status()
+                        st.success("เปลี่ยนชื่อ Company สำเร็จ")
+                        st.toast('เปลี่ยนชื่อ Company สำเร็จ', icon='✅')
+                        st.rerun()
+                    except requests.HTTPError as e:
+                        detail = e.response.json().get("detail", str(e))
+                        st.error(f"เปลี่ยนชื่อไม่สำเร็จ: {detail}")
+
+            st.divider()
+
+            # Delete Company
+            st.markdown("**ลบ Company**")
+            st.warning(f"การลบ Company '{selected_name}' จะลบข้อมูลทั้งหมดที่เกี่ยวข้องอย่างถาวร")
+            if st.checkbox(f"ฉันต้องการลบ Company '{selected_name}'", key=f"delete_confirm_{cid}"):
+                if st.button("🗑️ ลบ Company ทันที", type="primary", key=f"delete_btn_{cid}"):
+                    try:
+                        r = requests.delete(f"{API_BASE}/companies/{cid}")
+                        r.raise_for_status()
+                        st.success(f"ลบ Company '{selected_name}' สำเร็จ")
+                        st.rerun()
+                    except requests.HTTPError as e:
+                        detail = e.response.json().get("detail", str(e))
+                        st.error(f"ลบไม่สำเร็จ: {detail}")
         
         st.divider()
 
@@ -116,7 +215,7 @@ with tab2:
                             rr.raise_for_status()
                             st.rerun()
                         except Exception as e:
-                            st.error(f"���บไม่สำเร็จ: {e}")
+                            st.error(f"ลบไม่สำเร็จ: {e}")
             else:
                 st.info("ยังไม่มี Bank ในบริษัทนี้")
 
@@ -212,189 +311,8 @@ with tab3:
     else:
         st.info("ยังไม่มีบริษัทในระบบ — เพิ่มบริษัทก่อนในแท็บ Settings")
 
-def censor_token(token: str) -> str:
-    """Censors a token, showing only the first character and the last four characters."""
-    if not isinstance(token, str) or len(token) <= 5: # 1 for prefix, 4 for suffix
-        return "********"
-    return f"{token[:1]}...........{token[-4:]}"
-
-# ---------- Tab 4: LINE Notification ----------
+# ---------- Tab 4: Reconcile ----------
 with tab4:
-    st.subheader("ส่งข้อความผ่าน LINE")
-
-    # --- Channel Management ---
-    with st.expander("จัดการบัญชีผู้ส่ง (LINE Channels)"):
-        st.markdown("เพิ่มหรือลบช่องทางสำหรับส่งข้อความ")
-
-        # Fetch current channels
-        try:
-            channels_res = requests.get(f"{API_BASE}/line/channels")
-            channels_res.raise_for_status()
-            channels = channels_res.json()
-        except Exception as e:
-            st.error(f"ไม่ส��มารถโหลดรายชื่อช่องทางได้: {e}")
-            channels = []
-
-        # Display channels with delete buttons
-        if channels:
-            for ch in channels:
-                col1, col2, c3 = st.columns([2, 4, 1])
-                col1.text(ch['name'])
-                col2.text(censor_token(ch['token']))
-                if c3.button("🗑️ ลบ", key=f"del_channel_{ch['id']}"):
-                    try:
-                        del_res = requests.delete(f"{API_BASE}/line/channels/{ch['id']}")
-                        del_res.raise_for_status()
-                        st.toast("ลบช่องทางสำเร็จ", icon="✅")
-                        st.rerun()
-                    except requests.HTTPError as e:
-                        detail = e.response.json().get("detail", str(e))
-                        st.error(f"ลบไม่สำเร็จ: {detail}")
-
-        # Add new channel
-        with st.form("add_channel_form", clear_on_submit=True):
-            st.markdown("**เพิ่มช่องทางใหม่**")
-            new_channel_name = st.text_input("ชื่อช่องทาง (Channel Name)", placeholder="เช่น 'Marketing', 'Support'")
-            new_channel_token = st.text_input("Channel Access Token", type="password", placeholder="ใส่ Token ที่นี่")
-            submitted = st.form_submit_button("➕ เพิ่มช่องทาง")
-            if submitted:
-                if not new_channel_name.strip() or not new_channel_token.strip():
-                    st.error("กรุณากรอกข้อมูลให้ครบถ้วน")
-                else:
-                    try:
-                        add_res = requests.post(f"{API_BASE}/line/channels", json={
-                            "name": new_channel_name.strip(),
-                            "token": new_channel_token.strip()
-                        })
-                        add_res.raise_for_status()
-                        st.toast("เพิ่มช่องทางสำเร็จ", icon="✅")
-                        st.rerun()
-                    except requests.HTTPError as e:
-                        detail = e.response.json().get("detail", str(e))
-                        st.error(f"เพิ่มไม่สำเร็จ: {detail}")
-
-    # --- Recipient Management ---
-    with st.expander("จัดการรายชื่อผู้รับ (LINE User ID)"):
-        st.markdown("เพิ่มหรือลบรายชื่อผู้รับข้อความ")
-
-        # Fetch channels for dropdown
-        try:
-            channels_res = requests.get(f"{API_BASE}/line/channels")
-            channels_res.raise_for_status()
-            channels = channels_res.json()
-            channel_map = {ch['name']: ch['id'] for ch in channels}
-        except Exception as e:
-            st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
-            channels = []
-            channel_map = {}
-
-        if not channels:
-            st.warning("กรุณาเพิ่มช่องทางผู้ส่งก่อน เพื่อใช้ในการดึงข้อมูลโปรไฟล์ผู้รับ")
-        else:
-            selected_channel_name_for_recipients = st.selectbox(
-                "เลือกช่องทางเพื่อแสดงข้อมูลผู้รับ", 
-                options=list(channel_map.keys()),
-                key="recipient_channel_select"
-            )
-            
-            if selected_channel_name_for_recipients:
-                selected_channel_id = channel_map[selected_channel_name_for_recipients]
-                
-                # Fetch recipient details using the selected channel
-                try:
-                    recipients_res = requests.get(f"{API_BASE}/line/channels/{selected_channel_id}/recipients")
-                    recipients_res.raise_for_status()
-                    recipients = recipients_res.json()
-                except Exception as e:
-                    st.error(f"ไม่สามารถโหลดรายชื่อผู้รับได้: {e}")
-                    recipients = []
-
-                # Display recipients with delete buttons
-                if recipients:
-                    for r in recipients:
-                        col1, col2 = st.columns([4, 1])
-                        col1.text(f"{r['displayName']} ({r['uid']})")
-                        if col2.button("🗑️ ลบ", key=f"del_recipient_{r['id']}"):
-                            try:
-                                del_res = requests.delete(f"{API_BASE}/line/recipients/{r['id']}")
-                                del_res.raise_for_status()
-                                st.toast("ลบผู้รับสำเร็จ", icon="✅")
-                                st.rerun()
-                            except requests.HTTPError as e:
-                                detail = e.response.json().get("detail", str(e))
-                                st.error(f"ลบไม่สำเร็จ: {detail}")
-                else:
-                    st.info("ยังไม่มีผู้รับในระบบ")
-
-        # Add new recipient
-        with st.form("add_recipient_form", clear_on_submit=True):
-            new_uid = st.text_input("LINE User ID", placeholder="U123456789...")
-            submitted = st.form_submit_button("➕ เพิ่มผู้รับ")
-            if submitted:
-                if not new_uid.strip():
-                    st.error("กรุณาใส่ User ID")
-                elif 'selected_channel_id' not in locals() or not selected_channel_id:
-                    st.error("กรุณาเลือกช่องทางด้านบนก่อนเพิ่มผู้รับ")
-                else:
-                    try:
-                        add_res = requests.post(f"{API_BASE}/line/recipients", json={
-                            "channel_id": selected_channel_id,
-                            "uid": new_uid.strip()
-                        })
-                        add_res.raise_for_status()
-                        st.toast("เพิ่มผู้รับสำเร็จ", icon="✅")
-                        st.rerun()
-                    except requests.HTTPError as e:
-                        detail = e.response.json().get("detail", str(e))
-                        st.error(f"เพิ่มไม่สำเร็จ: {detail}")
-
-    st.divider()
-
-    # --- Send Message ---
-    st.markdown("### ส่งข้อความ")
-    
-    # Fetch channels for dropdown
-    try:
-        channels_res = requests.get(f"{API_BASE}/line/channels")
-        channels_res.raise_for_status()
-        channels = channels_res.json()
-        channel_map = {ch['name']: ch['id'] for ch in channels}
-    except Exception as e:
-        st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
-        channels = []
-        channel_map = {}
-
-    if not channels:
-        st.warning("ยังไม่มีการตั้งค่าช่องทางสำหรับส่งข้อความ กรุณาเพิ่มช่องทางก่อน")
-    else:
-        selected_channel_name = st.selectbox("เลือกช่องทางที่จะใช้ส่ง", options=list(channel_map.keys()))
-        
-        message_text = st.text_area("ข้อความที่จะส่ง:", height=150, placeholder="พิมพ์ข้อความที่นี่...")
-        
-        if st.button("🚀 ส่งข้อความ", type="primary"):
-            if not message_text.strip():
-                st.error("กรุณาพิมพ์ข้อความที่จะส่ง")
-            elif not selected_channel_name:
-                st.error("กรุณาเลือกช่องทางที่จะใช้ส่ง")
-            else:
-                selected_channel_id = channel_map[selected_channel_name]
-                with st.spinner("กำลังส่งข้อความ..."):
-                    try:
-                        send_res = requests.post(f"{API_BASE}/line/send_message", json={
-                            "channel_id": selected_channel_id,
-                            "message": message_text.strip()
-                        })
-                        send_res.raise_for_status()
-                        sent_count = send_res.json().get("sent_count", 0)
-                        st.success(f"ส่งข้อความสำเร็จ ({sent_count} คน)")
-                        st.balloons()
-                    except requests.HTTPError as e:
-                        detail = e.response.json().get("detail", str(e))
-                        st.error(f"ส่งข้อความไม่สำเร็จ: {detail}")
-                    except Exception as e:
-                        st.error(f"เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
-                    # ---------- Tab 5: Reconcile ----------
-with tab5:
     st.subheader("Reconcile")
 
     companies = []
@@ -446,4 +364,3 @@ with tab5:
                     st.error(f"An unexpected error occurred: {e}")
     else:
         st.info("ยังไม่มีบริษัทในระบบ — เพิ่มบริษัทก่อนในแท็บ Settings")
-

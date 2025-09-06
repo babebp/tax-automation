@@ -68,7 +68,9 @@ def init_db():
         cur.execute("""
         CREATE TABLE IF NOT EXISTS companies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL
+            name TEXT UNIQUE NOT NULL,
+            google_drive_folder_id TEXT,
+            google_drive_folder_name TEXT
         )
         """)
         # banks table (many-to-one relationship with companies)
@@ -118,6 +120,8 @@ class CompanyCreate(BaseModel):
 class Company(BaseModel):
     id: int
     name: str
+    google_drive_folder_id: Optional[str] = None
+    google_drive_folder_name: Optional[str] = None
 
 class BankCreate(BaseModel):
     company_id: int
@@ -220,8 +224,8 @@ def on_startup():
 def list_companies():
     """Lists all companies."""
     with get_conn() as conn:
-        rows = conn.execute("SELECT id, name FROM companies ORDER BY name").fetchall()
-        return [Company(id=r["id"], name=r["name"]) for r in rows]
+        rows = conn.execute("SELECT id, name, google_drive_folder_id, google_drive_folder_name FROM companies ORDER BY name").fetchall()
+        return [Company(id=r["id"], name=r["name"], google_drive_folder_id=r["google_drive_folder_id"], google_drive_folder_name=r["google_drive_folder_name"]) for r in rows]
 
 @app.post("/companies", response_model=Company)
 def create_company(payload: CompanyCreate):
@@ -234,6 +238,48 @@ def create_company(payload: CompanyCreate):
             raise HTTPException(status_code=400, detail="Company name already exists.")
         row = conn.execute("SELECT id, name FROM companies WHERE id = ?", (cid,)).fetchone()
         return Company(id=row["id"], name=row["name"])
+
+@app.delete("/companies/{company_id}")
+def delete_company(company_id: int):
+    """Deletes a company and all its associated data."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT id FROM companies WHERE id = ?", (company_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company not found.")
+        conn.execute("DELETE FROM companies WHERE id = ?", (company_id,))
+        return {"ok": True}
+
+@app.put("/companies/{company_id}", response_model=Company)
+def update_company(company_id: int, payload: CompanyCreate):
+    """Updates a company's name."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT id FROM companies WHERE id = ?", (company_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Company not found.")
+        try:
+            conn.execute("UPDATE companies SET name = ? WHERE id = ?", (payload.name.strip(), company_id))
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="Company name already exists.")
+        row = conn.execute("SELECT id, name, google_drive_folder_id, google_drive_folder_name FROM companies WHERE id = ?", (company_id,)).fetchone()
+        return Company(id=row["id"], name=row["name"], google_drive_folder_id=row["google_drive_folder_id"], google_drive_folder_name=row["google_drive_folder_name"])
+
+class CompanyDriveFolderUpdate(BaseModel):
+    google_drive_folder_id: str
+    google_drive_folder_name: str
+
+@app.put("/companies/{company_id}/google-drive-folder", response_model=Company)
+def update_company_drive_folder(company_id: int, payload: CompanyDriveFolderUpdate):
+    """Updates the Google Drive folder for a company."""
+    with get_conn() as conn:
+        c = conn.execute("SELECT id FROM companies WHERE id = ?", (company_id,)).fetchone()
+        if not c:
+            raise HTTPException(status_code=404, detail="Company not found.")
+        conn.execute(
+            "UPDATE companies SET google_drive_folder_id = ?, google_drive_folder_name = ? WHERE id = ?",
+            (payload.google_drive_folder_id, payload.google_drive_folder_name, company_id)
+        )
+        row = conn.execute("SELECT id, name, google_drive_folder_id, google_drive_folder_name FROM companies WHERE id = ?", (company_id,)).fetchone()
+        return Company(id=row["id"], name=row["name"], google_drive_folder_id=row["google_drive_folder_id"], google_drive_folder_name=row["google_drive_folder_name"])
 
 # ---------- Bank endpoints ----------
 @app.get("/companies/{company_id}/banks", response_model=List[Bank])
@@ -439,6 +485,26 @@ def send_line_message(payload: LineMessage):
 
     return {"ok": True, "sent_count": success_count}
 
+class GoogleDriveFolder(BaseModel):
+    id: str
+    name: str
+
+@app.get("/google-drive/folders", response_model=List[GoogleDriveFolder])
+def list_google_drive_folders():
+    """Lists all folders accessible by the service account in Google Drive."""
+    try:
+        drive_service = gd.get_drive_service()
+        # Query for all folders accessible by the service account.
+        # This is simpler and more robust than checking ownership.
+        query = "mimeType = 'application/vnd.google-apps.folder'"
+        
+        folders = gd.find_files(drive_service, query)
+        return [GoogleDriveFolder(id=f['id'], name=f['name']) for f in folders]
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Google Drive API error: {e}")
+
 # ---------- Workflow endpoints ----------
 @app.post("/workflow/start")
 def start_workflow(payload: WorkflowStart):
@@ -448,11 +514,14 @@ def start_workflow(payload: WorkflowStart):
     # Get company settings from the database
     logging.info("Fetching company settings from database.")
     with get_conn() as conn:
-        c = conn.execute("SELECT name FROM companies WHERE id = ?", (payload.company_id,)).fetchone()
+        c = conn.execute("SELECT name, google_drive_folder_id FROM companies WHERE id = ?", (payload.company_id,)).fetchone()
         if not c:
             logging.error(f"Company with id {payload.company_id} not found.")
             raise HTTPException(status_code=404, detail="Company not found.")
         company_name = c["name"]
+        company_folder_id = c["google_drive_folder_id"]
+        if not company_folder_id:
+            raise HTTPException(status_code=400, detail="Company does not have a Google Drive folder configured.")
         banks_cursor = conn.execute("SELECT bank_name, tb_code FROM company_banks WHERE company_id = ? ORDER BY bank_name", (payload.company_id,))
         banks = banks_cursor.fetchall()
         forms_cursor = conn.execute("SELECT form_type, tb_code FROM company_forms WHERE company_id = ?", (payload.company_id,))
@@ -470,17 +539,7 @@ def start_workflow(payload: WorkflowStart):
         logging.error(f"Google Drive authentication failed: {e}")
         raise HTTPException(status_code=500, detail=f"Google Drive authentication failed: {e}")
     logging.info("Google Drive authentication successful.")
-
-    # Find the company's main folder in Google Drive
-    folder_search_term = f"{company_name}"
-    logging.info(f"Searching for company folder with term: {folder_search_term}")
-    query = f"name contains '{folder_search_term}' and mimeType = 'application/vnd.google-apps.folder'"
-    folders = gd.find_files(drive_service, query)
-    if not folders:
-        logging.error(f"No Google Drive folder found for '{folder_search_term}'")
-        raise HTTPException(status_code=404, detail=f"No Google Drive folder found for '{folder_search_term}'")
-    company_folder_id = folders[0]['id']
-    logging.info(f"Found company folder with id: {company_folder_id}")
+    logging.info(f"Using company folder with id: {company_folder_id}")
 
     # --- Get Data Workflow (Same as before) ---
     logging.info("Starting Get Data Workflow.")
@@ -730,11 +789,14 @@ def start_reconcile(payload: ReconcileStart):
     
     # Get company name
     with get_conn() as conn:
-        c = conn.execute("SELECT name FROM companies WHERE id = ?", (payload.company_id,)).fetchone()
+        c = conn.execute("SELECT name, google_drive_folder_id FROM companies WHERE id = ?", (payload.company_id,)).fetchone()
         if not c:
             logging.error(f"Company with id {payload.company_id} not found.")
             raise HTTPException(status_code=404, detail="Company not found.")
         company_name = c["name"]
+        company_folder_id = c["google_drive_folder_id"]
+        if not company_folder_id:
+            raise HTTPException(status_code=400, detail="Company does not have a Google Drive folder configured.")
 
     # Authenticate with Google Drive
     logging.info("Authenticating with Google Drive.")
@@ -747,17 +809,7 @@ def start_reconcile(payload: ReconcileStart):
         logging.error(f"Google Drive authentication failed: {e}")
         raise HTTPException(status_code=500, detail=f"Google Drive authentication failed: {e}")
     logging.info("Google Drive authentication successful.")
-
-    # Find the company's main folder in Google Drive
-    folder_search_term = f"{company_name}"
-    logging.info(f"Searching for company folder with term: {folder_search_term}")
-    query = f"name contains '{folder_search_term}' and mimeType = 'application/vnd.google-apps.folder'"
-    folders = gd.find_files(drive_service, query)
-    if not folders:
-        logging.error(f"No Google Drive folder found for '{folder_search_term}'")
-        raise HTTPException(status_code=404, detail=f"No Google Drive folder found for '{folder_search_term}'")
-    company_folder_id = folders[0]['id']
-    logging.info(f"Found company folder with id: {company_folder_id}")
+    logging.info(f"Using company folder with id: {company_folder_id}")
 
     # Find and read the TB file
     tb_files_query = f"'{company_folder_id}' in parents and name contains 'tb' and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
