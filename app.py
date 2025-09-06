@@ -13,7 +13,7 @@ st.set_page_config(page_title="Tax Automation", layout="wide")
 st.title("Tax Automation")
 
 # Create tabs for different sections of the app
-tab1, tab2, tab3, tab4 = st.tabs(["Settings", "Company Config", "Workflow", "Reconcile"])
+tab1, tab2, tab3 = st.tabs(["Company Config", "Workflow", "Reconcile"])
 
 # ---------- Shared helper functions ----------
 def fetch_companies(): 
@@ -34,27 +34,29 @@ def fetch_forms(company_id: int):
     r.raise_for_status()
     return r.json()
 
-# ---------- Tab 1: Add Company ----------
-with tab1:
+@st.dialog("Add Company")
+def add_company_dialog():
     st.subheader("เพิ่ม Company")
-    new_company = st.text_input("Company name", key="new_company_name", placeholder="เช่น ACME Co., Ltd.")
-    if st.button("➕ เพิ่ม Company", type="primary"):
-        if not new_company.strip():
+    new_company_name = st.text_input("Company name", key="new_company_name_dialog", placeholder="เช่น ACME Co., Ltd.")
+    if st.button("Submit", key="submit_new_company"):
+        if not new_company_name.strip():
             st.error("กรุณาใส่ชื่อบริษัท")
         else:
             try:
-                # POST request to create a new company
-                r = requests.post(f"{API_BASE}/companies", json={"name": new_company.strip()})
+                r = requests.post(f"{API_BASE}/companies", json={"name": new_company_name.strip()})
                 r.raise_for_status()
-                st.success("เพิ่ม Company สำเร็จ")
                 st.toast('เพิ่ม Company สำเร็จ', icon='✅')
+                st.rerun()
             except requests.HTTPError as e:
                 detail = e.response.json().get("detail", str(e))
                 st.error(f"เพิ่มไม่สำเร็จ: {detail}")
 
-# ---------- Tab 2: Company Config ----------
-with tab2:
+# ---------- Tab 1: Company Config ----------
+with tab1:
     st.subheader("ตั้งค่า Company")
+
+    if st.button("➕ Add Company"):
+        add_company_dialog()
 
     companies = []
     try:
@@ -75,11 +77,9 @@ with tab2:
         folder_name = selected_company.get("google_drive_folder_name") or "ยังไม่ได้เลือก"
         st.info(f"Folder ที่เลือกไว้: **{folder_name}**")
 
-        # Initialize session state for managing the folder selection UI
         if 'show_folder_selection' not in st.session_state:
             st.session_state.show_folder_selection = False
         
-        # Persist the selected company ID in session state to avoid issues across reruns
         st.session_state.selected_company_id_for_folder = cid
 
         if st.button("เปลี่ยน Folder"):
@@ -111,7 +111,6 @@ with tab2:
                 with col1:
                     if st.button("💾 บันทึก", type="primary"):
                         selected_folder_id = folder_options[selected_folder_name]
-                        # Use the company ID from session state
                         company_id_to_update = st.session_state.selected_company_id_for_folder
                         update_res = requests.put(
                             f"{API_BASE}/companies/{company_id_to_update}/google-drive-folder",
@@ -132,9 +131,7 @@ with tab2:
         
         st.divider()
 
-        # --- Edit and Delete Company ---
         with st.expander("จัดการ Company"):
-            # Edit Company Name
             st.markdown("**แก้ไขชื่อ Company**")
             new_name = st.text_input("New company name", value=selected_company["name"], key=f"edit_name_{cid}")
             if st.button("💾 บันทึกชื่อใหม่", key=f"save_name_{cid}"):
@@ -153,7 +150,6 @@ with tab2:
 
             st.divider()
 
-            # Delete Company
             st.markdown("**ลบ Company**")
             st.warning(f"การลบ Company '{selected_name}' จะลบข้อมูลทั้งหมดที่เกี่ยวข้องอย่างถาวร")
             if st.checkbox(f"ฉันต้องการลบ Company '{selected_name}'", key=f"delete_confirm_{cid}"):
@@ -171,7 +167,6 @@ with tab2:
 
         cols = st.columns(2)
         
-        # Left column for managing banks
         with cols[0]:
             st.markdown("### Bank (เพิ่มได้ไม่จำกัด)")
             with st.container():
@@ -183,7 +178,6 @@ with tab2:
                         st.error("กรุณากรอกให้ครบ")
                     else:
                         try:
-                            # POST request to add a new bank
                             r = requests.post(f"{API_BASE}/banks", json={
                                 "company_id": cid,
                                 "bank_name": bank_name.strip(),
@@ -210,7 +204,6 @@ with tab2:
                     c3.write(f'Company ID: {b["company_id"]}')
                     if c4.button("🗑️ ลบ", key=f"del_bank_{b['id']}"):
                         try:
-                            # DELETE request to remove a bank
                             rr = requests.delete(f"{API_BASE}/banks/{b['id']}")
                             rr.raise_for_status()
                             st.rerun()
@@ -219,7 +212,6 @@ with tab2:
             else:
                 st.info("ยังไม่มี Bank ในบริษัทนี้")
 
-        # Right column for managing fixed forms
         with cols[1]:
             st.markdown("### แบบฟอร์มคงที่ (แก้ไข TB Code ได้เท่านั้น)")
             try:
@@ -237,7 +229,6 @@ with tab2:
                 submitted = st.form_submit_button("💾 บันทึก TB Code ทั้งหมด", type="primary")
                 if submitted:
                     try:
-                        # PUT request to update form TB codes
                         r = requests.put(f"{API_BASE}/companies/{cid}/forms", json={"data": form_inputs})
                         r.raise_for_status()
                         st.success("บันทึกสำเร็จ")
@@ -245,10 +236,12 @@ with tab2:
                         detail = e.response.json().get("detail", str(e))
                         st.error(f"บันทึกไม่สำเร็จ: {detail}")
     else:
-        st.info("ยังไม่มีบริษัทในระบบ — เพิ่มบริษัทก่อนในแท็บ Settings")
+        st.info("ยังไม่มีบริษัทในระบบ")
+        if st.button("➕ Add First Company"):
+            add_company_dialog()
 
-# ---------- Tab 3: Workflow ----------
-with tab3:
+# ---------- Tab 2: Workflow ----------
+with tab2:
     st.subheader("Workflow")
 
     companies = []
@@ -263,7 +256,6 @@ with tab3:
         selected_company = next(c for c in companies if c["name"] == selected_name)
         cid = selected_company["id"]
 
-        # Dropdowns for month and year selection
         months = [f"{i:02d}" for i in range(1, 13)]
         current_year = 2025
         years = list(range(2021, current_year + 1))
@@ -274,7 +266,6 @@ with tab3:
         if st.button("Start", type="primary"):
             with st.spinner(f"Processing workflow for {selected_name} for {selected_month}/{selected_year}..."):
                 try:
-                    # POST request to start the workflow and receive a file
                     r = requests.post(f"{API_BASE}/workflow/start", json={
                         "company_id": cid,
                         "month": selected_month,
@@ -282,9 +273,8 @@ with tab3:
                     }, stream=True)
                     r.raise_for_status()
                     
-                    # Extract filename from response headers
                     content_disposition = r.headers.get('content-disposition')
-                    filename = "workflow_result.xlsx" # Default filename
+                    filename = "workflow_result.xlsx"
                     if content_disposition:
                         parts = content_disposition.split(';')
                         for part in parts:
@@ -292,7 +282,6 @@ with tab3:
                                 filename = part.split('=')[1].strip('"')
 
                     st.success("✅ Workflow complete!")
-                    # Display download button for the generated Excel file
                     st.download_button(
                         label="📥 Download Excel File",
                         data=r.content,
@@ -309,10 +298,10 @@ with tab3:
                 except Exception as e:
                     st.error(f"An unexpected error occurred: {e}")
     else:
-        st.info("ยังไม่มีบริษัทในระบบ — เพิ่มบริษัทก่อนในแท็บ Settings")
+        st.info("ยังไม่มีบริษัทในระบบ")
 
-# ---------- Tab 4: Reconcile ----------
-with tab4:
+# ---------- Tab 3: Reconcile ----------
+with tab3:
     st.subheader("Reconcile")
 
     companies = []
@@ -330,15 +319,13 @@ with tab4:
         if st.button("Start Reconcile", type="primary"):
             with st.spinner(f"Processing reconcile for {selected_name}..."):
                 try:
-                    # POST request to start the reconcile and receive a file
                     r = requests.post(f"{API_BASE}/reconcile/start", json={
                         "company_id": cid,
                     }, stream=True)
                     r.raise_for_status()
                     
-                    # Extract filename from response headers
                     content_disposition = r.headers.get('content-disposition')
-                    filename = "reconcile_result.xlsx" # Default filename
+                    filename = "reconcile_result.xlsx"
                     if content_disposition:
                         parts = content_disposition.split(';')
                         for part in parts:
@@ -346,7 +333,6 @@ with tab4:
                                 filename = part.split('=')[1].strip('"')
 
                     st.success("✅ Reconcile complete!")
-                    # Display download button for the generated Excel file
                     st.download_button(
                         label="📥 Download Excel File",
                         data=r.content,
@@ -363,4 +349,4 @@ with tab4:
                 except Exception as e:
                     st.error(f"An unexpected error occurred: {e}")
     else:
-        st.info("ยังไม่มีบริษัทในระบบ — เพิ่มบริษัทก่อนในแท็บ Settings")
+        st.info("ยังไม่มีบริษัทในระบบ")
