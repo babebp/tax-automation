@@ -967,6 +967,26 @@ def start_reconcile(payload: ReconcileStart):
                     i += 1
             
             if "pp30_subsheet" in payload.parts:
+                # This part will be executed within the GL file processing block
+                # It assumes gl_wb and gl_sheet are available.
+                
+                # Ensure the PP30 sheet is created once
+                if "PP30" not in wb.sheetnames:
+                    pp30_ws = wb.create_sheet(title="PP30")
+                    # Setup headers and months as per RECONCILE.md 3.1 & 3.2
+                    pp30_ws['C4'] = "เดือน"
+                    pp30_ws['D4'] = "PP30"
+                    pp30_ws['E4'] = "รายได้"
+                    pp30_ws['F4'] = "ลดหนี้"
+                    pp30_ws['G4'] = "Diff"
+                    thai_months = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
+                    for i, month in enumerate(thai_months):
+                        pp30_ws[f'C{i+5}'] = month
+                
+                # Get a reference to the possibly newly created sheet
+                pp30_ws = wb["PP30"]
+
+                # --- Logic to populate Column E from GL file ---
                 with get_conn() as conn:
                     forms_cursor = conn.execute("SELECT form_type, tb_code FROM company_forms WHERE company_id = ?", (payload.company_id,))
                     forms_map = {row['form_type']: row['tb_code'] for row in forms_cursor.fetchall()}
@@ -975,85 +995,74 @@ def start_reconcile(payload: ReconcileStart):
                 
                 if revenue_tb_code:
                     revenue_totals = [0.0] * 12
-                    for row in gl_sheet.iter_rows(min_row=2):
+                    # This logic needs to be adapted from the original to work here
+                    # Assuming gl_sheet is the active GL sheet loaded above
+                    for row in gl_sheet.iter_rows(min_row=2): # Example logic, might need adjustment
+                        # This is a simplified logic, the original complex one should be used
+                        # For now, let's keep the original logic structure
                         if str(row[0].value) == revenue_tb_code:
                             try:
                                 date_cell = row[1].value
-                                if date_cell:
+                                if date_cell and hasattr(date_cell, 'month'):
                                     month_index = date_cell.month - 1
                                     if 0 <= month_index < 12:
                                         amount = row[8].value if len(row) > 8 and row[8].value else 0
                                         revenue_totals[month_index] += float(amount)
                             except (ValueError, IndexError, AttributeError) as e:
-                                logging.warning(f"Could not parse date or amount for Revenue calculation: {e}")
-                    
-                    if "PP30" not in wb.sheetnames:
-                        pp30_ws = wb.create_sheet(title="PP30")
-                        pp30_ws['C4'] = "เดือน"
-                        pp30_ws['D4'] = "PP30"
-                        pp30_ws['E4'] = "รายได้"
-                        pp30_ws['F4'] = "ลดหนี้"
-                        pp30_ws['G4'] = "Diff"
-                        thai_months = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
-                        for i, month in enumerate(thai_months):
-                            pp30_ws[f'C{i+5}'] = month
-                    
+                                logging.warning(f"Could not parse row for Revenue calculation: {e}")
+
                     for i, total in enumerate(revenue_totals):
-                        wb["PP30"][f'E{i+5}'] = total
+                        pp30_ws[f'E{i+5}'] = total if total != 0 else "-"
 
-    if "pp30_subsheet" in payload.parts:
-        # Create and setup the PP30 sheet according to RECONCILE.md 3.1 & 3.2
-        pp30_ws = wb.create_sheet(title="PP30")
-        pp30_ws['C4'] = "เดือน"
-        pp30_ws['D4'] = "PP30"
-        pp30_ws['E4'] = "รายได้"
-        pp30_ws['F4'] = "ลดหนี้"
-        pp30_ws['G4'] = "Diff"
+        # --- This block is now outside the GL file check ---
+        if "pp30_subsheet" in payload.parts:
+            # If the sheet wasn't created above (e.g. no GL file), create it now.
+            if "PP30" not in wb.sheetnames:
+                pp30_ws = wb.create_sheet(title="PP30")
+                pp30_ws['C4'] = "เดือน"
+                pp30_ws['D4'] = "PP30"
+                pp30_ws['E4'] = "รายได้"
+                pp30_ws['F4'] = "ลดหนี้"
+                pp30_ws['G4'] = "Diff"
+                thai_months = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
+                for i, month in enumerate(thai_months):
+                    pp30_ws[f'C{i+5}'] = month
+            
+            pp30_ws = wb["PP30"]
 
-        thai_months = [
-            "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
-            "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"
-        ]
-        for i, month in enumerate(thai_months):
-            pp30_ws[f'C{i+5}'] = month
+            # --- Logic to populate Column D from PDF files (RECONCILE.md 3.3) ---
+            pp30_folders_query = f"'{company_folder_id}' in parents and name contains 'ภพ30' and mimeType = 'application/vnd.google-apps.folder'"
+            pp30_folders = gd.find_files(drive_service, pp30_folders_query)
+            if pp30_folders:
+                pp30_folder_id = pp30_folders[0]['id']
+                for i, month in enumerate(range(1, 13)):
+                    month_str = f"{month:02d}"
+                    file_query = f"'{pp30_folder_id}' in parents and name contains '{payload.year}{month_str}' and mimeType = 'application/pdf'"
+                    pp30_files = gd.find_files(drive_service, file_query)
 
-        # Fetch data for column D according to RECONCILE.md 3.3
-        pp30_folders_query = f"'{company_folder_id}' in parents and name contains 'ภพ30' and mimeType = 'application/vnd.google-apps.folder'"
-        pp30_folders = gd.find_files(drive_service, pp30_folders_query)
-        if pp30_folders:
-            pp30_folder_id = pp30_folders[0]['id']
-            for i, month in enumerate(range(1, 13)):
-                month_str = f"{month:02d}"
-                # Updated to search for filenames containing year and month
-                file_query = f"'{pp30_folder_id}' in parents and name contains '{payload.year}{month_str}' and mimeType = 'application/pdf'"
-                pp30_files = gd.find_files(drive_service, file_query)
-
-                if pp30_files:
-                    file_id = pp30_files[0]['id']
-                    request = drive_service.files().get_media(fileId=file_id)
-                    fh = BytesIO()
-                    downloader = MediaIoBaseDownload(fh, request)
-                    done = False
-                    while not done:
-                        status, done = downloader.next_chunk()
-                    fh.seek(0)
-                    
-                    prompt = "จากเอกสารนี้ ให้ดึงตัวเลขของหัวข้อ 'ยอดขายที่ต้องเสียภาษี' ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด"
-                    amount_str = get_amount_from_gemini(fh.getvalue(), prompt)
-                    try:
-                        # Attempt to convert the extracted string to a number
-                        amount = float(amount_str.replace(",", ""))
-                    except (ValueError, TypeError):
-                        logging.warning(f"Could not convert '{amount_str}' to a number for PP30 month {month_str}.")
-                        amount = amount_str  # Keep the original string if conversion fails
-                    pp30_ws[f'D{i+5}'] = amount
-                else:
-                    # If no file is found for the month, insert "-"
+                    if pp30_files:
+                        file_id = pp30_files[0]['id']
+                        request = drive_service.files().get_media(fileId=file_id)
+                        fh = BytesIO()
+                        downloader = MediaIoBaseDownload(fh, request)
+                        done = False
+                        while not done:
+                            status, done = downloader.next_chunk()
+                        fh.seek(0)
+                        
+                        prompt = "จากเอกสารนี้ ให้ดึงตัวเลขของหัวข้อ 'ยอดขายที่ต้องเสียภาษี' ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด"
+                        amount_str = get_amount_from_gemini(fh.getvalue(), prompt)
+                        try:
+                            amount = float(amount_str.replace(",", ""))
+                        except (ValueError, TypeError):
+                            logging.warning(f"Could not convert '{amount_str}' to a number for PP30 month {month_str}.")
+                            amount = amount_str
+                        pp30_ws[f'D{i+5}'] = amount
+                    else:
+                        pp30_ws[f'D{i+5}'] = "-"
+            else:
+                for i in range(12):
                     pp30_ws[f'D{i+5}'] = "-"
-        else:
-            # If the main PP30 folder is not found, fill all months with "-"
-            for i in range(12):
-                pp30_ws[f'D{i+5}'] = "-"
     
     # Save and return workbook
     virtual_workbook = BytesIO()
