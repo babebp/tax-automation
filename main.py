@@ -1001,7 +1001,8 @@ def start_reconcile(payload: ReconcileStart):
                     for i, total in enumerate(revenue_totals):
                         wb["PP30"][f'E{i+5}'] = total
 
-    if "pp30_subsheet" in payload.parts and "PP30" not in wb.sheetnames:
+    if "pp30_subsheet" in payload.parts:
+        # Create and setup the PP30 sheet according to RECONCILE.md 3.1 & 3.2
         pp30_ws = wb.create_sheet(title="PP30")
         pp30_ws['C4'] = "เดือน"
         pp30_ws['D4'] = "PP30"
@@ -1016,12 +1017,14 @@ def start_reconcile(payload: ReconcileStart):
         for i, month in enumerate(thai_months):
             pp30_ws[f'C{i+5}'] = month
 
+        # Fetch data for column D according to RECONCILE.md 3.3
         pp30_folders_query = f"'{company_folder_id}' in parents and name contains 'ภพ30' and mimeType = 'application/vnd.google-apps.folder'"
         pp30_folders = gd.find_files(drive_service, pp30_folders_query)
         if pp30_folders:
             pp30_folder_id = pp30_folders[0]['id']
             for i, month in enumerate(range(1, 13)):
                 month_str = f"{month:02d}"
+                # Updated to search for filenames containing year and month
                 file_query = f"'{pp30_folder_id}' in parents and name contains '{payload.year}{month_str}' and mimeType = 'application/pdf'"
                 pp30_files = gd.find_files(drive_service, file_query)
 
@@ -1038,11 +1041,19 @@ def start_reconcile(payload: ReconcileStart):
                     prompt = "จากเอกสารนี้ ให้ดึงตัวเลขของหัวข้อ 'ยอดขายที่ต้องเสียภาษี' ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด"
                     amount_str = get_amount_from_gemini(fh.getvalue(), prompt)
                     try:
+                        # Attempt to convert the extracted string to a number
                         amount = float(amount_str.replace(",", ""))
                     except (ValueError, TypeError):
-                        logging.warning(f"Could not convert '{amount_str}' to a number for PP30.")
-                        amount = amount_str
+                        logging.warning(f"Could not convert '{amount_str}' to a number for PP30 month {month_str}.")
+                        amount = amount_str  # Keep the original string if conversion fails
                     pp30_ws[f'D{i+5}'] = amount
+                else:
+                    # If no file is found for the month, insert "-"
+                    pp30_ws[f'D{i+5}'] = "-"
+        else:
+            # If the main PP30 folder is not found, fill all months with "-"
+            for i in range(12):
+                pp30_ws[f'D{i+5}'] = "-"
     
     # Save and return workbook
     virtual_workbook = BytesIO()
