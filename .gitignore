@@ -13,5 +13,4 @@ wheels/
 .streamlit
 *.log
 venv
-
-
+credential.json
