@@ -224,8 +224,15 @@ with tab1:
 
             form_inputs = {}
             with st.form(key=f"forms_edit_{cid}", clear_on_submit=False):
-                for ft in fixed:
-                    form_inputs[ft] = st.text_input(f"{ft} TB Code", value=current.get(ft, ""), key=f"tb_{ft}_{cid}")
+                for ft in ["PND1", "PND3", "PND53", "PP30", "SSO"]:
+                    if ft in fixed:
+                        form_inputs[ft] = st.text_input(f"{ft} TB Code", value=current.get(ft, ""), key=f"tb_{ft}_{cid}")
+                
+                st.divider()
+                st.markdown("#### Reconcile Settings")
+                form_inputs["Revenue"] = st.text_input("รายได้ TB Code", value=current.get("Revenue", ""), key=f"tb_revenue_{cid}")
+                form_inputs["Credit Note"] = st.text_input("ลดหนี้ TB Code", value=current.get("Credit Note", ""), key=f"tb_credit_note_{cid}")
+
                 submitted = st.form_submit_button("💾 บันทึก TB Code ทั้งหมด", type="primary")
                 if submitted:
                     try:
@@ -316,11 +323,36 @@ with tab3:
         selected_company = next(c for c in companies if c["name"] == selected_name)
         cid = selected_company["id"]
 
+        current_year = 2025
+        years = list(range(2021, current_year + 1))
+        selected_year = st.selectbox("เลือกปี", options=years, index=len(years) - 1, key="reconcile_year_select")
+
+        st.divider()
+        st.subheader("Select parts to run:")
+        run_tb_subsheet = st.checkbox("TB Sub-sheet", value=True)
+        run_gl_subsheet = st.checkbox("GL Sub-sheet", value=True)
+        run_tb_code_subsheets = st.checkbox("TB Code Sub-sheets", value=True)
+        run_pp30_subsheet = st.checkbox("PP30 Sub-sheet", value=True)
+        st.divider()
+
         if st.button("Start Reconcile", type="primary"):
-            with st.spinner(f"Processing reconcile for {selected_name}..."):
+            parts_to_run = []
+            if run_tb_subsheet:
+                parts_to_run.append("tb_subsheet")
+            if run_gl_subsheet:
+                parts_to_run.append("gl_subsheet")
+            if run_tb_code_subsheets:
+                parts_to_run.append("tb_code_subsheets")
+            if run_pp30_subsheet:
+                parts_to_run.append("pp30_subsheet")
+
+            with st.spinner(f"Processing reconcile for {selected_name} for {selected_year}..."):
                 try:
+                    # POST request to start the reconcile and receive a file
                     r = requests.post(f"{API_BASE}/reconcile/start", json={
                         "company_id": cid,
+                        "year": selected_year,
+                        "parts": parts_to_run
                     }, stream=True)
                     r.raise_for_status()
                     

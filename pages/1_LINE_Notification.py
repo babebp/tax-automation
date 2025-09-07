@@ -14,59 +14,59 @@ def censor_token(token: str) -> str:
         return "********"
     return f"{token[:1]}...........{token[-4:]}"
 
+@st.dialog("Add LINE Channel")
+def add_channel_dialog():
+    st.markdown("**เพิ่มช่องทางใหม่**")
+    new_channel_name = st.text_input("ชื่อช่องทาง (Channel Name)", placeholder="เช่น 'Marketing', 'Support'")
+    new_channel_token = st.text_input("Channel Access Token", type="password", placeholder="ใส่ Token ที่นี่")
+    if st.button("Submit"):
+        if not new_channel_name.strip() or not new_channel_token.strip():
+            st.error("กรุณากรอกข้อมูลให้ครบถ้วน")
+        else:
+            try:
+                add_res = requests.post(f"{API_BASE}/line/channels", json={
+                    "name": new_channel_name.strip(),
+                    "token": new_channel_token.strip()
+                })
+                add_res.raise_for_status()
+                st.toast("เพิ่มช่องทางสำเร็จ", icon="✅")
+                st.rerun()
+            except requests.HTTPError as e:
+                detail = e.response.json().get("detail", str(e))
+                st.error(f"เพิ่มไม่สำเร็จ: {detail}")
+
 # ---------- LINE Notification Page Content ----------
 st.subheader("ส่งข้อความผ่าน LINE")
 
 # --- Channel Management ---
-with st.expander("จัดการบัญชีผู้ส่ง (LINE Channels)"):
-    st.markdown("เพิ่มหรือลบช่องทางสำหรับส่งข้อความ")
+st.markdown("### จัดการบัญชีผู้ส่ง (LINE Channels)")
+if st.button("➕ Add Line Channel"):
+    add_channel_dialog()
 
-    # Fetch current channels
-    try:
-        channels_res = requests.get(f"{API_BASE}/line/channels")
-        channels_res.raise_for_status()
-        channels = channels_res.json()
-    except Exception as e:
-        st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
-        channels = []
+# Fetch current channels
+try:
+    channels_res = requests.get(f"{API_BASE}/line/channels")
+    channels_res.raise_for_status()
+    channels = channels_res.json()
+except Exception as e:
+    st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
+    channels = []
 
-    # Display channels with delete buttons
-    if channels:
-        for ch in channels:
-            col1, col2, c3 = st.columns([2, 4, 1])
-            col1.text(ch['name'])
-            col2.text(censor_token(ch['token']))
-            if c3.button("🗑️ ลบ", key=f"del_channel_{ch['id']}"):
-                try:
-                    del_res = requests.delete(f"{API_BASE}/line/channels/{ch['id']}")
-                    del_res.raise_for_status()
-                    st.toast("ลบช่องทางสำเร็จ", icon="✅")
-                    st.rerun()
-                except requests.HTTPError as e:
-                    detail = e.response.json().get("detail", str(e))
-                    st.error(f"ลบไม่สำเร็จ: {detail}")
-
-    # Add new channel
-    with st.form("add_channel_form", clear_on_submit=True):
-        st.markdown("**เพิ่มช่องทางใหม่**")
-        new_channel_name = st.text_input("ชื่อช่องทาง (Channel Name)", placeholder="เช่น 'Marketing', 'Support'")
-        new_channel_token = st.text_input("Channel Access Token", type="password", placeholder="ใส่ Token ที่นี่")
-        submitted = st.form_submit_button("➕ เพิ่มช่องทาง")
-        if submitted:
-            if not new_channel_name.strip() or not new_channel_token.strip():
-                st.error("กรุณากรอกข้อมูลให้ครบถ้วน")
-            else:
-                try:
-                    add_res = requests.post(f"{API_BASE}/line/channels", json={
-                        "name": new_channel_name.strip(),
-                        "token": new_channel_token.strip()
-                    })
-                    add_res.raise_for_status()
-                    st.toast("เพิ่มช่องทางสำเร็จ", icon="✅")
-                    st.rerun()
-                except requests.HTTPError as e:
-                    detail = e.response.json().get("detail", str(e))
-                    st.error(f"เพิ่มไม่สำเร็จ: {detail}")
+# Display channels with delete buttons
+if channels:
+    for ch in channels:
+        col1, col2, c3 = st.columns([2, 4, 1])
+        col1.text(ch['name'])
+        col2.text(censor_token(ch['token']))
+        if c3.button("🗑️ ลบ", key=f"del_channel_{ch['id']}"):
+            try:
+                del_res = requests.delete(f"{API_BASE}/line/channels/{ch['id']}")
+                del_res.raise_for_status()
+                st.toast("ลบช่องทางสำเร็จ", icon="✅")
+                st.rerun()
+            except requests.HTTPError as e:
+                detail = e.response.json().get("detail", str(e))
+                st.error(f"ลบไม่สำเร็จ: {detail}")
 
 # --- Recipient Management ---
 with st.expander("จัดการรายชื่อผู้รับ (LINE User ID)"):

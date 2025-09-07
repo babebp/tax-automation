@@ -144,6 +144,8 @@ class WorkflowStart(BaseModel):
 
 class ReconcileStart(BaseModel):
     company_id: int
+    year: int
+    parts: List[str]
 
 class LineRecipientCreate(BaseModel):
     channel_id: int
@@ -189,7 +191,7 @@ def get_amount_from_gemini(file_content: bytes, prompt: str) -> str:
         return f"Error: {e}"
 
 # ---------- Constants ----------
-FIXED_FORMS = ["PND1", "PND3", "PND53", "PP30", "SSO"]
+FIXED_FORMS = ["PND1", "PND3", "PND53", "PP30", "SSO", "Revenue", "Credit Note"]
 
 PROMPTS = {
     "BANK": "หายอดคงเหลืสุดท้ายให้หน่อย ตอบมาแค่ตัวเลขเท่านั้น ห้ามมีตัวหนังสืออื่นๆเด็ดขาด",
@@ -832,190 +834,183 @@ def start_reconcile(payload: ReconcileStart):
 
     # Create a new workbook for reconcile result
     wb = openpyxl.Workbook()
-    sheet = wb.active
-    sheet.title = "TB"
+    # Remove the default sheet created
+    if "Sheet" in wb.sheetnames:
+        wb.remove(wb["Sheet"])
 
-    # Copy data from tb_sheet to the new sheet, excluding the last row
-    for row_index, row in enumerate(tb_sheet.iter_rows(max_row=tb_sheet.max_row - 1), start=1):
-        for col_index, cell in enumerate(row[:8], start=1):
-            sheet.cell(row=row_index + 5, column=col_index, value=cell.value)
+    if "tb_subsheet" in payload.parts:
+        # Find and read the TB file
+        tb_files_query = f"'{company_folder_id}' in parents and name contains 'tb' and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
+        tb_files = gd.find_files(drive_service, tb_files_query)
+        if not tb_files:
+            logging.error("TB file not found.")
+            raise HTTPException(status_code=404, detail="TB file not found.")
 
-    # Add formulas and static values
-    # Step 1.3
-    for col in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O']:
-        sheet[f'{col}5'] = f'=SUBTOTAL(9,{col}8:{col}{sheet.max_row})'
-
-    # Step 1.4
-    sheet.merge_cells('I6:J6')
-    sheet['I6'] = 'ปรับปรุง'
-
-    # Step 1.5
-    sheet['I7'] = 'เดบิท'
-
-    # Step 1.6
-    sheet['J7'] = 'เครดิต'
-
-    # Step 1.7
-    sheet.merge_cells('K6:K7')
-    sheet['K6'] = 'Net'
-
-    # Step 1.8
-    sheet['K4'] = 'กำไร'
-
-    # Step 1.9
-    for row in range(8, sheet.max_row + 1):
-        sheet[f'K{row}'] = f'=G{row}+I{row}-H{row}-J{row}'
-
-    # Step 1.10
-    sheet['L3'] = '=+L5+L4'
-
-    # Step 1.11
-    sheet['L4'] = '=+M5-L5'
-
-    # Step 1.12
-    sheet['M3'] = '=+M5+M4'
-
-    # Step 1.13
-    sheet.merge_cells('L6:M6')
-    sheet['L6'] = 'งบกำไรขาดทุน'
-
-    # Step 1.14
-    sheet['L7'] = 'เดบิท'
-
-    # Step 1.15
-    sheet['M7'] = 'เครดิต'
-
-    # Step 1.16
-    sheet['N3'] = '=+N5+N4'
-
-    # Step 1.17
-    sheet['O2'] = '=+N3-O3'
-
-    # Step 1.18
-    sheet['O3'] = '=+O5+O4'
-
-    # Step 1.19
-    sheet['O4'] = '=+L4'
-
-    # Step 1.20 & 1.21
-    for row in range(8, sheet.max_row + 1):
-        a_val = sheet[f'A{row}'].value
-        if a_val and str(a_val).startswith(('4', '5')):
-            sheet[f'L{row}'] = f'=IF(K{row}>0,K{row},0)'
-            sheet[f'M{row}'] = f'=IF(K{row}<0,-K{row},0)'
-
-    # Step 1.22 & 1.23
-    for row in range(8, sheet.max_row + 1):
-        a_val = sheet[f'A{row}'].value
-        if a_val and str(a_val).startswith(('1', '2', '3')):
-            sheet[f'N{row}'] = f'=IF(K{row}>0,K{row},0)'
-            sheet[f'O{row}'] = f'=IF(K{row}<0,-K{row},0)'
-    
-    # Step 1.24
-    sheet['M2'] = '=+L3-M3'
-
-    # Step 1.25
-    sheet.merge_cells('N6:O6')
-    sheet['N6'] = 'งบแสดงฐานะการเงิน'
-
-    # Step 1.26
-    sheet['N7'] = 'เดบิท'
-
-    # Step 1.27
-    sheet['O7'] = 'เครดิต'
-
-    # Step 1.28
-    sheet['A1'] = 'ชื่อบริษัท'
-    sheet['B1'] = company_name
-
-    # Step 1.29
-    sheet['A2'] = 'งบทดลอง ณ วันที่'
-
-    # Step 1.30
-    sheet['A3'] = 'เลขที่บัญชีจาก'
-
-    # Step 1.31
-    sheet['A4'] = 'วันที่จาก'
-
-    # Step 1.32
-    sheet['A5'] = 'เลือกแผนก'
-
-    # Step 1.33
-    sheet['B3'] = 'xxxxxx - xxxxxx'
-
-    # Step 1.34
-    sheet['B5'] = '* รวมบัญชียอดเป็น 0 N'
-
-    # Step 1.35
-    sheet['B4'] = '_ ถึง _'
-
-    # Step 1.36
-    sheet['B2'] = 'xx มกราคม xxx'
-
-    # Step 4: Create sub-sheets for each TB Code from the GL file
-    # Find and read the GL file
-    gl_files_query = f"'{company_folder_id}' in parents and name contains 'gl' and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
-    gl_files = gd.find_files(drive_service, gl_files_query)
-    if gl_files:
-        gl_file_id = gl_files[0]['id']
-        logging.info(f"GL file found with id: {gl_file_id}")
-        request = drive_service.files().get_media(fileId=gl_file_id)
+        tb_file_id = tb_files[0]['id']
+        logging.info(f"TB file found with id: {tb_file_id}")
+        request = drive_service.files().get_media(fileId=tb_file_id)
         fh = BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
         done = False
         while not done:
             status, done = downloader.next_chunk()
         fh.seek(0)
-        # Load the workbook in data_only mode to get cell values instead of formulas
-        gl_wb = openpyxl.load_workbook(fh, data_only=True)
-        gl_sheet = gl_wb.active
+        tb_wb = openpyxl.load_workbook(fh)
+        tb_sheet = tb_wb.active
 
-        # Create GL sheet and copy all data
-        gl_ws = wb.create_sheet(title="GL")
-        for row in gl_sheet.iter_rows(values_only=True):
-            gl_ws.append(row)
+        sheet = wb.create_sheet(title="TB")
 
-        # Process GL data to create TB Code sub-sheets
-        data_rows = list(gl_sheet.iter_rows(values_only=True))
-        i = 0
-        while i < len(data_rows):
-            row = data_rows[i]
-            if row and row[0] and "ลำดับที่" in str(row[0]):
-                if i > 0:
-                    prev_row = data_rows[i-1]
-                    account_info = str(prev_row[0]) if prev_row and prev_row[0] else ""
-                    if account_info.startswith(('1', '2')):
-                        account_number = account_info.split()[0]
-                        
-                        # Extract data block starting from the "ลำดับที่" row
-                        account_data_block = []
-                        block_end_index = i
-                        for j in range(i, len(data_rows)):
-                            current_block_row = data_rows[j]
-                            account_data_block.append(current_block_row)
-                            block_end_index = j
-                            # The block ends with a row where the first cell is empty or None
-                            if not current_block_row or not current_block_row[0]:
-                                break
-                        
-                        # Get or create the target worksheet
-                        if account_number in wb.sheetnames:
-                            ws = wb[account_number]
-                        else:
-                            ws = wb.create_sheet(title=account_number)
-                        
-                        # Append the data block
-                        for data_row in account_data_block:
-                            ws.append(data_row)
-                        
-                        # Add an extra empty row for spacing
-                        ws.append([])
-                        
-                        # Update the main loop index to continue after the processed block
-                        i = block_end_index + 1
-                        continue
-            i += 1
+        # Copy data from tb_sheet to the new sheet, excluding the last row
+        for row_index, row in enumerate(tb_sheet.iter_rows(max_row=tb_sheet.max_row - 1), start=1):
+            for col_index, cell in enumerate(row[:8], start=1):
+                sheet.cell(row=row_index + 5, column=col_index, value=cell.value)
 
+        # Add formulas and static values
+        for col in ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O']:
+            sheet[f'{col}5'] = f'=SUBTOTAL(9,{col}8:{col}{sheet.max_row})'
+        sheet.merge_cells('I6:J6')
+        sheet['I6'] = 'ปรับปรุง'
+        sheet['I7'] = 'เดบิท'
+        sheet['J7'] = 'เครดิต'
+        sheet.merge_cells('K6:K7')
+        sheet['K6'] = 'Net'
+        sheet['K4'] = 'กำไร'
+        for row in range(8, sheet.max_row + 1):
+            sheet[f'K{row}'] = f'=G{row}+I{row}-H{row}-J{row}'
+        sheet['L3'] = '=+L5+L4'
+        sheet['L4'] = '=+M5-L5'
+        sheet['M3'] = '=+M5+M4'
+        sheet.merge_cells('L6:M6')
+        sheet['L6'] = 'งบกำไรขาดทุน'
+        sheet['L7'] = 'เดบิท'
+        sheet['M7'] = 'เครดิต'
+        sheet['N3'] = '=+N5+N4'
+        sheet['O2'] = '=+N3-O3'
+        sheet['O3'] = '=+O5+O4'
+        sheet['O4'] = '=+L4'
+        for row in range(8, sheet.max_row + 1):
+            a_val = sheet[f'A{row}'].value
+            if a_val and str(a_val).startswith(('4', '5')):
+                sheet[f'L{row}'] = f'=IF(K{row}>0,K{row},0)'
+                sheet[f'M{row}'] = f'=IF(K{row}<0,-K{row},0)'
+        for row in range(8, sheet.max_row + 1):
+            a_val = sheet[f'A{row}'].value
+            if a_val and str(a_val).startswith(('1', '2', '3')):
+                sheet[f'N{row}'] = f'=IF(K{row}>0,K{row},0)'
+                sheet[f'O{row}'] = f'=IF(K{row}<0,-K{row},0)'
+        sheet['M2'] = '=+L3-M3'
+        sheet.merge_cells('N6:O6')
+        sheet['N6'] = 'งบแสดงฐานะการเงิน'
+        sheet['N7'] = 'เดบิท'
+        sheet['O7'] = 'เครดิต'
+        sheet['A1'] = 'ชื่อบริษัท'
+        sheet['B1'] = company_name
+        sheet['A2'] = 'งบทดลอง ณ วันที่'
+        sheet['A3'] = 'เลขที่บัญชีจาก'
+        sheet['A4'] = 'วันที่จาก'
+        sheet['A5'] = 'เลือกแผนก'
+        sheet['B3'] = 'xxxxxx - xxxxxx'
+        sheet['B5'] = '* รวมบัญชียอดเป็น 0 N'
+        sheet['B4'] = '_ ถึง _'
+        sheet['B2'] = 'xx มกราคม xxx'
+
+    if any(part in payload.parts for part in ["gl_subsheet", "tb_code_subsheets"]):
+        # Find and read the GL file
+        gl_files_query = f"'{company_folder_id}' in parents and name contains 'gl' and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
+        gl_files = gd.find_files(drive_service, gl_files_query)
+        if gl_files:
+            gl_file_id = gl_files[0]['id']
+            logging.info(f"GL file found with id: {gl_file_id}")
+            request = drive_service.files().get_media(fileId=gl_file_id)
+            fh = BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+            fh.seek(0)
+            gl_wb = openpyxl.load_workbook(fh, data_only=True)
+            gl_sheet = gl_wb.active
+
+            if "gl_subsheet" in payload.parts:
+                gl_ws = wb.create_sheet(title="GL")
+                for row in gl_sheet.iter_rows(values_only=True):
+                    gl_ws.append(row)
+
+            if "tb_code_subsheets" in payload.parts:
+                data_rows = list(gl_sheet.iter_rows(values_only=True))
+                i = 0
+                while i < len(data_rows):
+                    row = data_rows[i]
+                    if row and row[0] and "ลำดับที่" in str(row[0]):
+                        if i > 0:
+                            prev_row = data_rows[i-1]
+                            account_info = str(prev_row[0]) if prev_row and prev_row[0] else ""
+                            if account_info.startswith(('1', '2')):
+                                account_number = account_info.split()[0]
+                                account_data_block = []
+                                block_end_index = i
+                                for j in range(i, len(data_rows)):
+                                    current_block_row = data_rows[j]
+                                    account_data_block.append(current_block_row)
+                                    block_end_index = j
+                                    if not current_block_row or not current_block_row[0]:
+                                        break
+                                if account_number in wb.sheetnames:
+                                    ws = wb[account_number]
+                                else:
+                                    ws = wb.create_sheet(title=account_number)
+                                for data_row in account_data_block:
+                                    ws.append(data_row)
+                                ws.append([])
+                                i = block_end_index + 1
+                                continue
+                    i += 1
+
+    if "pp30_subsheet" in payload.parts:
+        pp30_ws = wb.create_sheet(title="PP30")
+        pp30_ws['C4'] = "เดือน"
+        pp30_ws['D4'] = "PP30"
+        pp30_ws['E4'] = "รายได้"
+        pp30_ws['F4'] = "ลดหนี้"
+        pp30_ws['G4'] = "Diff"
+
+        thai_months = [
+            "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+            "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"
+        ]
+        for i, month in enumerate(thai_months):
+            pp30_ws[f'C{i+5}'] = month
+
+        pp30_folders_query = f"'{company_folder_id}' in parents and name contains 'ภพ30' and mimeType = 'application/vnd.google-apps.folder'"
+        pp30_folders = gd.find_files(drive_service, pp30_folders_query)
+        if pp30_folders:
+            pp30_folder_id = pp30_folders[0]['id']
+            for i, month in enumerate(range(1, 13)):
+                month_str = f"{month:02d}"
+                file_query = f"'{pp30_folder_id}' in parents and name contains '{payload.year}{month_str}' and mimeType = 'application/pdf'"
+                pp30_files = gd.find_files(drive_service, file_query)
+
+                if pp30_files:
+                    file_id = pp30_files[0]['id']
+                    request = drive_service.files().get_media(fileId=file_id)
+                    fh = BytesIO()
+                    downloader = MediaIoBaseDownload(fh, request)
+                    done = False
+                    while not done:
+                        status, done = downloader.next_chunk()
+                    fh.seek(0)
+                    
+                    prompt = "จากเอกสารนี้ ให้ดึงตัวเลขของหัวข้อ 'ยอดขายที่ต้องเสียภาษี' ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด"
+                    amount_str = get_amount_from_gemini(fh.getvalue(), prompt)
+                    try:
+                        # Convert the extracted string to a float, removing commas
+                        amount = float(amount_str.replace(",", ""))
+                    except (ValueError, TypeError):
+                        # If conversion fails, keep the original string and log a warning
+                        logging.warning(f"Could not convert '{amount_str}' to a number for PP30.")
+                        amount = amount_str
+                    pp30_ws[f'D{i+5}'] = amount
+    
     # Save and return workbook
     virtual_workbook = BytesIO()
     wb.save(virtual_workbook)

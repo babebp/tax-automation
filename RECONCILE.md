@@ -53,13 +53,21 @@ E4 = "รายได้"
 F4 = "ลดหนี้"
 G4 = "Diff"
 
-
-
 3.2
 C5-C16 = List month in Thai (มกราคม - ธันวาคม)
 
 3.3
-D5-D16 = Read from GL sub sheet 41210
+D5-D16 = Read from PP30 files each month (for example we select year 2025 then read all PP30 file that contain "2025" then extract a number from "ยอดขายที่ต้องเสียภาษี") *each pp30 file = each month, for example "company_PP30_01-2025" "company_PP30_02-2025" so we read all month in that year and put it accordingly* is fle not found then put "-"
+
+3.4
+E5-E16 = 
+- get TB Code from UI
+- Read from GL sub sheet (do not reference just read from it) 
+- 
+
+3.5
+F5-F16 = 
+- get TB Code from UI
 
 4. Each TB Code
 4.1 From company directory in google drive (as we selected for example "0.Com1_TestWorkFlowAutomation_2025"); Read file xlsx that filename contain "gl";
