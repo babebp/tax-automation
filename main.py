@@ -914,7 +914,7 @@ def start_reconcile(payload: ReconcileStart):
         sheet['B4'] = '_ ถึง _'
         sheet['B2'] = 'xx มกราคม xxx'
 
-    if any(part in payload.parts for part in ["gl_subsheet", "tb_code_subsheets"]):
+    if any(part in payload.parts for part in ["gl_subsheet", "tb_code_subsheets", "pp30_subsheet"]):
         # Find and read the GL file
         gl_files_query = f"'{company_folder_id}' in parents and name contains 'gl' and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
         gl_files = gd.find_files(drive_service, gl_files_query)
@@ -965,8 +965,43 @@ def start_reconcile(payload: ReconcileStart):
                                 i = block_end_index + 1
                                 continue
                     i += 1
+            
+            if "pp30_subsheet" in payload.parts:
+                with get_conn() as conn:
+                    forms_cursor = conn.execute("SELECT form_type, tb_code FROM company_forms WHERE company_id = ?", (payload.company_id,))
+                    forms_map = {row['form_type']: row['tb_code'] for row in forms_cursor.fetchall()}
+                
+                revenue_tb_code = forms_map.get("Revenue")
+                
+                if revenue_tb_code:
+                    revenue_totals = [0.0] * 12
+                    for row in gl_sheet.iter_rows(min_row=2):
+                        if str(row[0].value) == revenue_tb_code:
+                            try:
+                                date_cell = row[1].value
+                                if date_cell:
+                                    month_index = date_cell.month - 1
+                                    if 0 <= month_index < 12:
+                                        amount = row[8].value if len(row) > 8 and row[8].value else 0
+                                        revenue_totals[month_index] += float(amount)
+                            except (ValueError, IndexError, AttributeError) as e:
+                                logging.warning(f"Could not parse date or amount for Revenue calculation: {e}")
+                    
+                    if "PP30" not in wb.sheetnames:
+                        pp30_ws = wb.create_sheet(title="PP30")
+                        pp30_ws['C4'] = "เดือน"
+                        pp30_ws['D4'] = "PP30"
+                        pp30_ws['E4'] = "รายได้"
+                        pp30_ws['F4'] = "ลดหนี้"
+                        pp30_ws['G4'] = "Diff"
+                        thai_months = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
+                        for i, month in enumerate(thai_months):
+                            pp30_ws[f'C{i+5}'] = month
+                    
+                    for i, total in enumerate(revenue_totals):
+                        wb["PP30"][f'E{i+5}'] = total
 
-    if "pp30_subsheet" in payload.parts:
+    if "pp30_subsheet" in payload.parts and "PP30" not in wb.sheetnames:
         pp30_ws = wb.create_sheet(title="PP30")
         pp30_ws['C4'] = "เดือน"
         pp30_ws['D4'] = "PP30"
@@ -1003,10 +1038,8 @@ def start_reconcile(payload: ReconcileStart):
                     prompt = "จากเอกสารนี้ ให้ดึงตัวเลขของหัวข้อ 'ยอดขายที่ต้องเสียภาษี' ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด"
                     amount_str = get_amount_from_gemini(fh.getvalue(), prompt)
                     try:
-                        # Convert the extracted string to a float, removing commas
                         amount = float(amount_str.replace(",", ""))
                     except (ValueError, TypeError):
-                        # If conversion fails, keep the original string and log a warning
                         logging.warning(f"Could not convert '{amount_str}' to a number for PP30.")
                         amount = amount_str
                     pp30_ws[f'D{i+5}'] = amount

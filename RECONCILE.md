@@ -59,11 +59,19 @@ C5-C16 = List month in Thai (มกราคม - ธันวาคม)
 3.3
 D5-D16 = Read from PP30 files each month (for example we select year 2025 then read all PP30 file that contain "2025" then extract a number from "ยอดขายที่ต้องเสียภาษี") *each pp30 file = each month, for example "company_PP30_01-2025" "company_PP30_02-2025" so we read all month in that year and put it accordingly* is fle not found then put "-"
 
+
+3.4 and 3.5 do as we loop GL file to match TB Code from "GL Sub Sheet" and "TB Code Sub Sheet"
 3.4
 E5-E16 = 
-- get TB Code from UI
-- Read from GL sub sheet (do not reference just read from it) 
-- 
+- get TB Code "รายได้" find if column A contains this TB Code
+the structure will be like this
+"TB Code"
+ลำดับที่
+1
+2
+3
+...
+- as the structure I want to sum column I for every index (1, 2, 3, 4 below ลำดับที่)
 
 3.5
 F5-F16 = 
