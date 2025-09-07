@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: tax_automation_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount the credentials file into the container
+      - ./credential.json:/app/credential.json:ro
+      # Mount a volume to persist the SQLite database
+      - .:/app
+    # Load environment variables from a .env file
+    env_file:
+      - .env
+    # The command to run the FastAPI app is in the Dockerfile
+
+  frontend:
+    build: .
+    container_name: tax_automation_frontend
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      # Mount the credentials file into the container
+      - ./credential.json:/app/credential.json:ro
+      # Mount the application code
+      - .:/app
+    # Load environment variables from a .env file
+    env_file:
+      - .env
+    environment:
+      # Override the API_BASE for container-to-container communication
+      - API_BASE=http://api:8000
+    # Override the default command to run the Streamlit app
+    command: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+    depends_on:
+      - api
+
+volumes:
+  db_data:

@@ -104,6 +104,13 @@ def init_db():
             FOREIGN KEY(channel_id) REFERENCES line_channels(id) ON DELETE CASCADE
         )
         """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS line_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT UNIQUE NOT NULL,
+            display_name TEXT NOT NULL
+        )
+        """)
         # line_channels table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS line_channels (
@@ -116,6 +123,16 @@ def init_db():
 # ---------- Pydantic schemas ----------
 class CompanyCreate(BaseModel):
     name: str = Field(..., min_length=1)
+
+class LineEventSource(BaseModel):
+    userId: str
+
+class LineEvent(BaseModel):
+    type: str
+    source: LineEventSource
+
+class LineWebhook(BaseModel):
+    events: List[LineEvent]
 
 class Company(BaseModel):
     id: int
@@ -198,9 +215,7 @@ PROMPTS = {
     "PND1": "ภายในหัวข้อ \"สำหรับใบเสร็จรับเงิน\" ให้ตัวเลขของ \"จำนวนเงิน\" ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด",
     "PND3": "ภายในหัวข้อ \"สำหรับใบเสร็จรับเงิน\" ให้ตัวเลขของ \"จำนวนเงิน\" ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด",
     "PND53": "ภายในหัวข้อ \"สำหรับใบเสร็จรับเงิน\" ให้ตัวเลขของ \"จำนวนเงิน\" ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด",
-    "PP30": """ภายในหัวข้อ \"ภาษีสุทธิ\" ให้ดึงตัวเลขของช่องที่ 11 หรือช่องที่ 12 มาโดยหากดึงจากช่อง 11 ให้ดึงมาตรงๆ แต่ถ้าเป็นช่องที่ 12 ให้ดึงแล้วเปลี่ยนเป็นค่าลบ ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามที่ตัวหนังสือเด็ดขาด
-
-หมายเหตุ: ในเอกสารจะมีเลขแค่ช่องใดช่องหนึ่งเท่านั้น (ไม่ 11 ก็ 12)""",
+    "PP30": """ภายในหัวข้อ \"ภาษีสุทธิ\" ให้ดึงตัวเลขของช่องที่ 11 หรือช่องที่ 12 มาโดยหากดึงจากช่อง 11 ให้ดึงมาตรงๆ แต่ถ้าเป็นช่องที่ 12 ให้ดึงแล้วเปลี่ยนเป็นค่าลบ ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามที่ตัวหนังสือเด็ดขาด\n\nหมายเหตุ: ในเอกสารจะมีเลขแค่ช่องใดช่องหนึ่งเท่านั้น (ไม่ 11 ก็ 12)""",
     "SSO": "ภายในหัวข้อ \"จำนวนเงินที่ำระ\" ให้ตัวเลออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด"
 }
 
@@ -345,6 +360,31 @@ def upsert_company_forms(company_id: int, payload: FormsUpsert):
         return {"ok": True}
 
 # ---------- LINE Notify endpoints ----------
+@app.post("/line/webhook")
+def line_webhook(payload: LineWebhook):
+    """Handles incoming LINE messages to capture user information."""
+    for event in payload.events:
+        if event.type == "message":
+            user_id = event.source.userId
+            # Fetch user profile from LINE API
+            profile_url = f"https://api.line.me/v2/bot/profile/{user_id}"
+            headers = {"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
+            try:
+                res = requests.get(profile_url, headers=headers, timeout=5)
+                res.raise_for_status()
+                profile = res.json()
+                display_name = profile.get("displayName", "Unknown")
+                
+                # Store user in the database, ignoring duplicates
+                with get_conn() as conn:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO line_users (uid, display_name) VALUES (?, ?)",
+                        (user_id, display_name)
+                    )
+            except requests.RequestException as e:
+                logging.error(f"Could not fetch LINE profile for UID {user_id}: {e}")
+    return {"ok": True}
+
 @app.post("/line/recipients", response_model=LineRecipient)
 def add_line_recipient(payload: LineRecipientCreate):
     """Adds a new LINE recipient to a specific channel."""
@@ -781,7 +821,7 @@ def start_workflow(payload: WorkflowStart):
     return StreamingResponse(
         virtual_workbook,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'} # Corrected header escaping
     )
 
 # ---------- Reconcile endpoints ----------
@@ -986,7 +1026,7 @@ def start_reconcile(payload: ReconcileStart):
                 # Get a reference to the possibly newly created sheet
                 pp30_ws = wb["PP30"]
 
-                # --- Logic to populate Column E from GL file ---
+                # --- Logic to populate Column E from GL file based on PP30.md ---
                 with get_conn() as conn:
                     forms_cursor = conn.execute("SELECT form_type, tb_code FROM company_forms WHERE company_id = ?", (payload.company_id,))
                     forms_map = {row['form_type']: row['tb_code'] for row in forms_cursor.fetchall()}
@@ -994,25 +1034,56 @@ def start_reconcile(payload: ReconcileStart):
                 revenue_tb_code = forms_map.get("Revenue")
                 
                 if revenue_tb_code:
-                    revenue_totals = [0.0] * 12
-                    # This logic needs to be adapted from the original to work here
-                    # Assuming gl_sheet is the active GL sheet loaded above
-                    for row in gl_sheet.iter_rows(min_row=2): # Example logic, might need adjustment
-                        # This is a simplified logic, the original complex one should be used
-                        # For now, let's keep the original logic structure
-                        if str(row[0].value) == revenue_tb_code:
-                            try:
-                                date_cell = row[1].value
-                                if date_cell and hasattr(date_cell, 'month'):
-                                    month_index = date_cell.month - 1
-                                    if 0 <= month_index < 12:
-                                        amount = row[8].value if len(row) > 8 and row[8].value else 0
-                                        revenue_totals[month_index] += float(amount)
-                            except (ValueError, IndexError, AttributeError) as e:
-                                logging.warning(f"Could not parse row for Revenue calculation: {e}")
+                    monthly_revenue = {i: 0 for i in range(1, 13)}
+                    
+                    # Iterate through all sheets in the GL workbook
+                    for sheet_name in gl_wb.sheetnames:
+                        current_sheet = gl_wb[sheet_name]
+                        data_rows = list(current_sheet.iter_rows())
+                        
+                        i = 0
+                        while i < len(data_rows):
+                            row = data_rows[i]
+                            cell_value = row[0].value if row else None
+                            
+                            # Find a cell in column A containing the revenue TB code
+                            if cell_value and revenue_tb_code in str(cell_value):
+                                # Start processing transactions 2 rows down
+                                j = i + 2
+                                while j < len(data_rows):
+                                    transaction_row = data_rows[j]
+                                    
+                                    # Stop if column A is empty
+                                    if not transaction_row or not transaction_row[0].value:
+                                        break
+                                    
+                                    try:
+                                        date_cell = transaction_row[2].value if len(transaction_row) > 2 else None
+                                        amount_cell = transaction_row[8].value if len(transaction_row) > 8 else None
 
-                    for i, total in enumerate(revenue_totals):
-                        pp30_ws[f'E{i+5}'] = total if total != 0 else "-"
+                                        if date_cell and hasattr(date_cell, 'month'):
+                                            month = date_cell.month
+                                            amount = 0
+                                            if amount_cell and amount_cell != '-':
+                                                try:
+                                                    amount = float(amount_cell)
+                                                except (ValueError, TypeError):
+                                                    logging.warning(f"Could not convert amount '{amount_cell}' to number in row {j+1} of sheet {sheet_name}. Treating as 0.")
+                                            
+                                            monthly_revenue[month] += amount
+                                    except Exception as e:
+                                        logging.error(f"Error processing row {j+1} in sheet {sheet_name}: {e}")
+
+                                    j += 1
+                                
+                                i = j # Continue searching from where the block ended
+                            else:
+                                i += 1
+                    
+                    # Populate the PP30 sheet with the final totals
+                    for month, total in monthly_revenue.items():
+                        cell = f'E{month+4}'
+                        pp30_ws[cell] = total if total != 0 else "-"
 
         # --- This block is now outside the GL file check ---
         if "pp30_subsheet" in payload.parts:
@@ -1073,5 +1144,5 @@ def start_reconcile(payload: ReconcileStart):
     return StreamingResponse(
         virtual_workbook,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        headers={'Content-Disposition': f'attachment; filename="{filename}"'}
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'} # Corrected header escaping
     )
