@@ -222,10 +222,15 @@ PROMPTS = {
 # ... (FastAPI app setup and other endpoints remain the same) ...
 app = FastAPI(title="Company Settings API", version="1.0.0")
 
+
+origins = [
+    "https://app.byteduck.io",
+    "http://localhost:8501"
+]
 # Enable CORS for frontend development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
