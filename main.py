@@ -45,7 +45,6 @@ else:
     logging.warning("GEMINI_API_KEY environment variable not set. PDF processing will fail.")
 
 # Configure LINE API
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_API_URL = "https://api.line.me/v2/bot/message/push"
 
 DB_PATH = "app.db"
@@ -385,12 +384,21 @@ def upsert_company_forms(company_id: int, payload: FormsUpsert):
 @app.post("/line/webhook")
 def line_webhook(payload: LineWebhook):
     """Handles incoming LINE messages to capture user information."""
+    # Use the token from the first channel in the DB for webhook operations
+    with get_conn() as conn:
+        channel_row = conn.execute("SELECT token FROM line_channels ORDER BY id LIMIT 1").fetchone()
+        if not channel_row:
+            logging.error("LINE webhook called, but no channels are configured in the database.")
+            # Return a 200 to LINE so it doesn't retry, but log the issue.
+            return {"ok": True, "detail": "No channels configured."}
+        access_token = channel_row["token"]
+
     for event in payload.events:
         # Handle user messages (direct 1-on-1 chat)
         if event.type == "message" and event.source.userId:
             user_id = event.source.userId
             profile_url = f"https://api.line.me/v2/bot/profile/{user_id}"
-            headers = {"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
+            headers = {"Authorization": f"Bearer {access_token}"}
             try:
                 res = requests.get(profile_url, headers=headers, timeout=5)
                 res.raise_for_status()
@@ -412,7 +420,7 @@ def line_webhook(payload: LineWebhook):
                 return {"ok": True}
 
             chat_name = f"Unknown Chat ({chat_id})"
-            headers = {"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
+            headers = {"Authorization": f"Bearer {access_token}"}
 
             # Check if it's a group (ID starts with 'C')
             if chat_id.startswith('C'):
