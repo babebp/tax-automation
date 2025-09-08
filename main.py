@@ -1073,82 +1073,112 @@ def start_reconcile(payload: ReconcileStart):
             if any(part in payload.parts for part in ["tb_code_subsheets", "pp30_subsheet"]):
                 
                 # --- Pre-loop setup ---
-                # For PP30
-                monthly_revenue = {i: 0 for i in range(1, 13)}
                 revenue_tb_code = None
+                credit_note_tb_code = None
                 if "pp30_subsheet" in payload.parts:
                     with get_conn() as conn:
                         forms_cursor = conn.execute("SELECT form_type, tb_code FROM company_forms WHERE company_id = ?", (payload.company_id,))
                         forms_map = {row['form_type']: row['tb_code'] for row in forms_cursor.fetchall()}
                     revenue_tb_code = forms_map.get("Revenue")
+                    credit_note_tb_code = forms_map.get("Credit Note")
 
-                # For TB Code Sub-sheets
+                # --- Loop Execution ---
+                gl_rows = list(gl_sheet.iter_rows(values_only=True))
+                i = 0
                 account_data_block = []
                 current_account_number = None
-                
-                # --- Single Loop Execution ---
-                for row_index, row in enumerate(gl_sheet.iter_rows(values_only=True)):
-                    # Logic for TB Code Sub-sheets
+
+                while i < len(gl_rows):
+                    row = gl_rows[i]
+                    row_str = str(row[0]) if row and row[0] else ""
+
+                    is_revenue_header = revenue_tb_code and revenue_tb_code in row_str
+                    is_credit_note_header = credit_note_tb_code and credit_note_tb_code in row_str
+
+                    if "pp30_subsheet" in payload.parts and (is_revenue_header or is_credit_note_header):
+                        target_sheet_name = "รายได้" if is_revenue_header else "ลดหนี้"
+                        if target_sheet_name not in wb.sheetnames:
+                            wb.create_sheet(title=target_sheet_name)
+                        
+                        data_block_start_index = i + 2
+                        block_i = data_block_start_index
+                        while block_i < len(gl_rows):
+                            block_row = gl_rows[block_i]
+                            if block_row and block_row[0] is not None and str(block_row[0]).strip():
+                                wb[target_sheet_name].append(block_row)
+                                block_i += 1
+                            else:
+                                break
+                        
+                        i = block_i
+                        continue
+
                     if "tb_code_subsheets" in payload.parts:
-                        cell_value = str(row[0]) if row and row[0] else ""
-                        if "ลำดับที่" in cell_value and row_index > 0:
-                            # Finalize the previous block
+                        if "ลำดับที่" in row_str and i > 0:
                             if current_account_number and account_data_block:
-                                if current_account_number in wb.sheetnames:
-                                    ws = wb[current_account_number]
-                                else:
+                                if current_account_number not in wb.sheetnames:
                                     ws = wb.create_sheet(title=current_account_number)
+                                else:
+                                    ws = wb[current_account_number]
                                 for data_row in account_data_block:
                                     ws.append(data_row)
                                 ws.append([])
                             
-                            # Start a new block
                             account_data_block = []
                             current_account_number = None
                             
-                            prev_row = list(gl_sheet.iter_rows(values_only=True))[row_index-1]
+                            prev_row = gl_rows[i-1]
                             account_info = str(prev_row[0]) if prev_row and prev_row[0] else ""
                             if account_info.startswith(('1', '2')):
                                 current_account_number = account_info.split()[0]
 
                         if current_account_number:
                             account_data_block.append(row)
-
-                    # Logic for PP30 Sub-sheet
-                    if "pp30_subsheet" in payload.parts and revenue_tb_code:
-                        # This assumes revenue data is within a block identified by the revenue_tb_code
-                        # A more robust check might be needed if revenue can appear outside of a standard block
-                        if row and len(row) > 8 and row[0] and revenue_tb_code in str(row[0]):
-                             # This row identifies the account, the actual data is in subsequent rows
-                             pass # This logic is simplified, assuming transaction rows are processed below
-                        
-                        try:
-                            date_cell = row[2] if len(row) > 2 else None
-                            amount_cell = row[8] if len(row) > 8 else None
-                            if date_cell and hasattr(date_cell, 'month'):
-                                month = date_cell.month
-                                amount = 0
-                                if amount_cell and amount_cell != '-':
-                                    try:
-                                        amount = float(amount_cell)
-                                    except (ValueError, TypeError):
-                                        pass # Ignore non-numeric amounts
-                                monthly_revenue[month] += amount
-                        except Exception:
-                            pass # Ignore rows that don't conform to the expected format
+                    
+                    i += 1
 
                 # --- Post-loop finalization ---
-                # Finalize the last TB code block
                 if "tb_code_subsheets" in payload.parts and current_account_number and account_data_block:
-                    if current_account_number in wb.sheetnames:
-                        ws = wb[current_account_number]
-                    else:
+                    if current_account_number not in wb.sheetnames:
                         ws = wb.create_sheet(title=current_account_number)
+                    else:
+                        ws = wb[current_account_number]
                     for data_row in account_data_block:
                         ws.append(data_row)
 
-                # Populate the PP30 sheet
                 if "pp30_subsheet" in payload.parts:
+                    # Helper function to perform calculations on sub-sheets
+                    def _calculate_monthly_totals(sheet):
+                        monthly_totals = {m: 0 for m in range(1, 13)}
+                        if not sheet:
+                            return monthly_totals
+                        
+                        # Add a header for the new column I if it doesn't exist
+                        if sheet.max_column < 9:
+                           sheet.cell(row=1, column=9).value = 'Calculated Total'
+
+                        for row_idx in range(2, sheet.max_row + 1):
+                            try:
+                                val_g = sheet.cell(row=row_idx, column=7).value
+                                val_h = sheet.cell(row=row_idx, column=8).value
+                                num_g = float(val_g) if val_g is not None else 0
+                                num_h = float(val_h) if val_h is not None else 0
+                                total_i = num_g + num_h
+                                sheet.cell(row=row_idx, column=9).value = total_i
+
+                                date_cell = sheet.cell(row=row_idx, column=3).value
+                                if date_cell and hasattr(date_cell, 'month'):
+                                    month = date_cell.month
+                                    monthly_totals[month] += total_i
+                            except (ValueError, TypeError):
+                                continue
+                        return monthly_totals
+
+                    # Calculate totals from "รายได้" and "ลดหนี้" sheets
+                    revenue_totals = _calculate_monthly_totals(wb["รายได้"] if "รายได้" in wb.sheetnames else None)
+                    credit_note_totals = _calculate_monthly_totals(wb["ลดหนี้"] if "ลดหนี้" in wb.sheetnames else None)
+
+                    # Create and populate the PP30 sheet
                     if "PP30" not in wb.sheetnames:
                         pp30_ws = wb.create_sheet(title="PP30")
                         pp30_ws['C4'] = "เดือน"
@@ -1161,9 +1191,9 @@ def start_reconcile(payload: ReconcileStart):
                             pp30_ws[f'C{i+5}'] = month
                     
                     pp30_ws = wb["PP30"]
-                    for month, total in monthly_revenue.items():
-                        cell = f'E{month+4}'
-                        pp30_ws[cell] = total if total != 0 else "-"
+                    for month in range(1, 13):
+                        pp30_ws[f'E{month+4}'] = revenue_totals[month] if revenue_totals[month] != 0 else "-"
+                        pp30_ws[f'F{month+4}'] = credit_note_totals[month] if credit_note_totals[month] != 0 else "-"
 
         # --- This block is now outside the GL file check ---
         if "pp30_subsheet" in payload.parts:
