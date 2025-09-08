@@ -36,40 +36,90 @@ def add_channel_dialog():
                 st.error(f"เพิ่มไม่สำเร็จ: {detail}")
 
 # ---------- LINE Notification Page Content ----------
-st.subheader("ส่งข้อความผ่าน LINE")
+st.subheader("LINE Message Management")
 
-# --- Channel Management ---
-st.markdown("### จัดการบัญชีผู้ส่ง (LINE Channels)")
-if st.button("➕ Add Line Channel"):
-    add_channel_dialog()
+# Create tabs
+tab1, tab2, tab3 = st.tabs(["Send Message", "Manage Recipients", "Registered Users"])
 
-# Fetch current channels
-try:
-    channels_res = requests.get(f"{API_BASE}/line/channels")
-    channels_res.raise_for_status()
-    channels = channels_res.json()
-except Exception as e:
-    st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
-    channels = []
+# --- Tab 1: Send Message ---
+with tab1:
+    st.markdown("### ส่งข้อความ")
 
-# Display channels with delete buttons
-if channels:
-    for ch in channels:
-        col1, col2, c3 = st.columns([2, 4, 1])
-        col1.text(ch['name'])
-        col2.text(censor_token(ch['token']))
-        if c3.button("🗑️ ลบ", key=f"del_channel_{ch['id']}"):
-            try:
-                del_res = requests.delete(f"{API_BASE}/line/channels/{ch['id']}")
-                del_res.raise_for_status()
-                st.toast("ลบช่องทางสำเร็จ", icon="✅")
-                st.rerun()
-            except requests.HTTPError as e:
-                detail = e.response.json().get("detail", str(e))
-                st.error(f"ลบไม่สำเร็จ: {detail}")
+    # Fetch channels for dropdown
+    try:
+        channels_res = requests.get(f"{API_BASE}/line/channels")
+        channels_res.raise_for_status()
+        channels = channels_res.json()
+        channel_map = {ch['name']: ch['id'] for ch in channels}
+    except Exception as e:
+        st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
+        channels = []
+        channel_map = {}
 
-# --- Recipient Management ---
-with st.expander("จัดการรายชื่อผู้รับ (LINE User ID)"):
+    if not channels:
+        st.warning("ยังไม่มีการตั้งค่าช่องทางสำหรับส่งข้อความ กรุณาเพิ่มช่องทางก่อน")
+    else:
+        selected_channel_name = st.selectbox("เลือกช่องทางที่จะใช้ส่ง", options=list(channel_map.keys()))
+        
+        message_text = st.text_area("ข้อความที่จะส่ง:", height=150, placeholder="พิมพ์ข้อความที่นี่...")
+        
+        if st.button("🚀 ส่งข้อความ", type="primary"):
+            if not message_text.strip():
+                st.error("กรุณาพิมพ์ข้อความที่จะส่ง")
+            elif not selected_channel_name:
+                st.error("กรุณาเลือกช่องทางที่จะใช้ส่ง")
+            else:
+                selected_channel_id = channel_map[selected_channel_name]
+                with st.spinner("กำลังส่งข้อความ..."):
+                    try:
+                        send_res = requests.post(f"{API_BASE}/line/send_message", json={
+                            "channel_id": selected_channel_id,
+                            "message": message_text.strip()
+                        })
+                        send_res.raise_for_status()
+                        sent_count = send_res.json().get("sent_count", 0)
+                        st.success(f"ส่งข้อความสำเร็จ ({sent_count} คน)")
+                        st.balloons()
+                    except requests.HTTPError as e:
+                        detail = e.response.json().get("detail", str(e))
+                        st.error(f"ส่งข้อความไม่สำเร็จ: {detail}")
+                    except Exception as e:
+                        st.error(f"เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
+
+# --- Tab 2: Manage Recipients ---
+with tab2:
+    st.markdown("### จัดการบัญชีผู้ส่ง (LINE Channels)")
+    if st.button("➕ Add Line Channel"):
+        add_channel_dialog()
+
+    # Fetch current channels
+    try:
+        channels_res = requests.get(f"{API_BASE}/line/channels")
+        channels_res.raise_for_status()
+        channels = channels_res.json()
+    except Exception as e:
+        st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
+        channels = []
+
+    # Display channels with delete buttons
+    if channels:
+        for ch in channels:
+            col1, col2, c3 = st.columns([2, 4, 1])
+            col1.text(ch['name'])
+            col2.text(censor_token(ch['token']))
+            if c3.button("🗑️ ลบ", key=f"del_channel_{ch['id']}"):
+                try:
+                    del_res = requests.delete(f"{API_BASE}/line/channels/{ch['id']}")
+                    del_res.raise_for_status()
+                    st.toast("ลบช่องทางสำเร็จ", icon="✅")
+                    st.rerun()
+                except requests.HTTPError as e:
+                    detail = e.response.json().get("detail", str(e))
+                    st.error(f"ลบไม่สำเร็จ: {detail}")
+    
+    st.divider()
+
+    st.markdown("### จัดการรายชื่อผู้รับ (LINE User ID)")
     st.markdown("เพิ่มหรือลบรายชื่อผู้รับข้อความ")
 
     # Fetch channels for dropdown
@@ -119,7 +169,7 @@ with st.expander("จัดการรายชื่อผู้รับ (LIN
                             detail = e.response.json().get("detail", str(e))
                             st.error(f"ลบไม่สำเร็จ: {detail}")
             else:
-                st.info("ยังไม่มีผู้รับในระบบ")
+                st.info("ยังไม่มีผู้รับในช่องทางนี้")
 
     # Add new recipient
     with st.form("add_recipient_form", clear_on_submit=True):
@@ -143,48 +193,29 @@ with st.expander("จัดการรายชื่อผู้รับ (LIN
                     detail = e.response.json().get("detail", str(e))
                     st.error(f"เพิ่มไม่สำเร็จ: {detail}")
 
-st.divider()
+# --- Tab 3: Registered Users ---
+with tab3:
+    st.markdown("### ผู้ใช้ทั้งหมดที่ลงทะเบียนผ่าน LINE")
+    st.markdown("รายชื่อผู้ใช้ทั้งหมดที่เคยส่งข้อความหาบอท")
 
-# --- Send Message ---
-st.markdown("### ส่งข้อความ")
-
-# Fetch channels for dropdown
-try:
-    channels_res = requests.get(f"{API_BASE}/line/channels")
-    channels_res.raise_for_status()
-    channels = channels_res.json()
-    channel_map = {ch['name']: ch['id'] for ch in channels}
-except Exception as e:
-    st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
-    channels = []
-    channel_map = {}
-
-if not channels:
-    st.warning("ยังไม่มีการตั้งค่าช่องทางสำหรับส่งข้อความ กรุณาเพิ่มช่องทางก่อน")
-else:
-    selected_channel_name = st.selectbox("เลือกช่องทางที่จะใช้ส่ง", options=list(channel_map.keys()))
-    
-    message_text = st.text_area("ข้อความที่จะส่ง:", height=150, placeholder="พิมพ์ข้อความที่นี่...")
-    
-    if st.button("🚀 ส่งข้อความ", type="primary"):
-        if not message_text.strip():
-            st.error("กรุณาพิมพ์ข้อความที่จะส่ง")
-        elif not selected_channel_name:
-            st.error("กรุณาเลือกช่องทางที่จะใช้ส่ง")
+    try:
+        users_res = requests.get(f"{API_BASE}/line/users")
+        users_res.raise_for_status()
+        users = users_res.json()
+        
+        if users:
+            # Prepare data for display
+            user_data = {
+                "User ID": [u["uid"] for u in users],
+                "Display Name": [u["display_name"] for u in users]
+            }
+            st.dataframe(user_data, use_container_width=True)
         else:
-            selected_channel_id = channel_map[selected_channel_name]
-            with st.spinner("กำลังส่งข้อความ..."):
-                try:
-                    send_res = requests.post(f"{API_BASE}/line/send_message", json={
-                        "channel_id": selected_channel_id,
-                        "message": message_text.strip()
-                    })
-                    send_res.raise_for_status()
-                    sent_count = send_res.json().get("sent_count", 0)
-                    st.success(f"ส่งข้อความสำเร็จ ({sent_count} คน)")
-                    st.balloons()
-                except requests.HTTPError as e:
-                    detail = e.response.json().get("detail", str(e))
-                    st.error(f"ส่งข้อความไม่สำเร็จ: {detail}")
-                except Exception as e:
-                    st.error(f"เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
+            st.info("ยังไม่มีผู้ใช้ที่ลงทะเบียนผ่าน LINE")
+
+    except requests.HTTPError as e:
+        detail = e.response.json().get("detail", str(e))
+        st.error(f"ไม่สามารถโหลดรายชื่อผู้ใช้ได้: {detail}")
+    except Exception as e:
+        st.error(f"เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
+

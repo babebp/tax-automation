@@ -191,6 +191,11 @@ class LineMessage(BaseModel):
     channel_id: int
     message: str = Field(..., min_length=1)
 
+class LineUser(BaseModel):
+    id: int
+    uid: str
+    display_name: str
+
 # ---------- New Helper Functions for PDF and LLM ----------
 def get_amount_from_gemini(file_content: bytes, prompt: str) -> str:
     """Sends a PDF file to Gemini LLM for OCR and returns the extracted amount."""
@@ -453,6 +458,14 @@ def get_recipient_details(channel_id: int):
         )
     
     return detailed_recipients
+
+
+@app.get("/line/users", response_model=List[LineUser])
+def list_line_users():
+    """Lists all unique LINE users who have interacted with the bot."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, uid, display_name FROM line_users ORDER BY display_name").fetchall()
+        return [LineUser(id=r["id"], uid=r["uid"], display_name=r["display_name"]) for r in rows]
 
 
 # ---------- LINE Channel endpoints ----------
