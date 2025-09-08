@@ -54,6 +54,7 @@ def add_company_dialog():
 # ---------- Tab 1: Company Config ----------
 with tab1:
     st.subheader("ตั้งค่า Company")
+    
 
     if st.button("➕ Add Company"):
         add_company_dialog()
@@ -70,6 +71,38 @@ with tab1:
         selected_company = next(c for c in companies if c["name"] == selected_name)
         cid = selected_company["id"]
 
+        with st.expander("จัดการ Company"):
+            st.markdown("**แก้ไขชื่อ Company**")
+            new_name = st.text_input("New company name", value=selected_company["name"], key=f"edit_name_{cid}")
+            if st.button("💾 บันทึกชื่อใหม่", key=f"save_name_{cid}"):
+                if not new_name.strip():
+                    st.error("ชื่อบริษัทห้ามว่างเปล่า")
+                else:
+                    try:
+                        r = requests.put(f"{API_BASE}/companies/{cid}", json={"name": new_name.strip()})
+                        r.raise_for_status()
+                        st.success("เปลี่ยนชื่อ Company สำเร็จ")
+                        st.toast('เปลี่ยนชื่อ Company สำเร็จ', icon='✅')
+                        st.rerun()
+                    except requests.HTTPError as e:
+                        detail = e.response.json().get("detail", str(e))
+                        st.error(f"เปลี่ยนชื่อไม่สำเร็จ: {detail}")
+
+            st.divider()
+
+            st.markdown("**ลบ Company**")
+            st.warning(f"การลบ Company '{selected_name}' จะลบข้อมูลทั้งหมดที่เกี่ยวข้องอย่างถาวร")
+            if st.checkbox(f"ฉันต้องการลบ Company '{selected_name}'", key=f"delete_confirm_{cid}"):
+                if st.button("🗑️ ลบ Company ทันที", type="primary", key=f"delete_btn_{cid}"):
+                    try:
+                        r = requests.delete(f"{API_BASE}/companies/{cid}")
+                        r.raise_for_status()
+                        st.success(f"ลบ Company '{selected_name}' สำเร็จ")
+                        st.rerun()
+                    except requests.HTTPError as e:
+                        detail = e.response.json().get("detail", str(e))
+                        st.error(f"ลบไม่สำเร็จ: {detail}")
+        
         st.divider()
 
         # --- Google Drive Folder Selection ---
@@ -131,46 +164,12 @@ with tab1:
         
         st.divider()
 
-        with st.expander("จัดการ Company"):
-            st.markdown("**แก้ไขชื่อ Company**")
-            new_name = st.text_input("New company name", value=selected_company["name"], key=f"edit_name_{cid}")
-            if st.button("💾 บันทึกชื่อใหม่", key=f"save_name_{cid}"):
-                if not new_name.strip():
-                    st.error("ชื่อบริษัทห้ามว่างเปล่า")
-                else:
-                    try:
-                        r = requests.put(f"{API_BASE}/companies/{cid}", json={"name": new_name.strip()})
-                        r.raise_for_status()
-                        st.success("เปลี่ยนชื่อ Company สำเร็จ")
-                        st.toast('เปลี่ยนชื่อ Company สำเร็จ', icon='✅')
-                        st.rerun()
-                    except requests.HTTPError as e:
-                        detail = e.response.json().get("detail", str(e))
-                        st.error(f"เปลี่ยนชื่อไม่สำเร็จ: {detail}")
-
-            st.divider()
-
-            st.markdown("**ลบ Company**")
-            st.warning(f"การลบ Company '{selected_name}' จะลบข้อมูลทั้งหมดที่เกี่ยวข้องอย่างถาวร")
-            if st.checkbox(f"ฉันต้องการลบ Company '{selected_name}'", key=f"delete_confirm_{cid}"):
-                if st.button("🗑️ ลบ Company ทันที", type="primary", key=f"delete_btn_{cid}"):
-                    try:
-                        r = requests.delete(f"{API_BASE}/companies/{cid}")
-                        r.raise_for_status()
-                        st.success(f"ลบ Company '{selected_name}' สำเร็จ")
-                        st.rerun()
-                    except requests.HTTPError as e:
-                        detail = e.response.json().get("detail", str(e))
-                        st.error(f"ลบไม่สำเร็จ: {detail}")
-        
-        st.divider()
-
         cols = st.columns(2)
         
-        with cols[0]:
-            st.markdown("### Bank (เพิ่มได้ไม่จำกัด)")
+        with cols[1]:
+            st.markdown("### Bank")
             with st.container():
-                st.markdown("**เพิ่ม Bank**")
+                # st.markdown("**เพิ่ม Bank**")
                 bank_name = st.text_input("Bank Name", key="bank_name_input", placeholder="เช่น SCB, KBank")
                 bank_tb_code = st.text_input("TB Code (Bank)", key="bank_tb_input", placeholder="เช่น TB-XXXX")
                 if st.button("➕ เพิ่ม Bank", key="add_bank_btn"):
@@ -212,7 +211,7 @@ with tab1:
             else:
                 st.info("ยังไม่มี Bank ในบริษัทนี้")
 
-        with cols[1]:
+        with cols[0]:
             st.markdown("### แบบฟอร์มคงที่ (แก้ไข TB Code ได้เท่านั้น)")
             try:
                 forms_payload = fetch_forms(cid)
@@ -233,7 +232,7 @@ with tab1:
                 form_inputs["Revenue"] = st.text_input("รายได้ TB Code", value=current.get("Revenue", ""), key=f"tb_revenue_{cid}")
                 form_inputs["Credit Note"] = st.text_input("ลดหนี้ TB Code", value=current.get("Credit Note", ""), key=f"tb_credit_note_{cid}")
 
-                submitted = st.form_submit_button("💾 บันทึก TB Code ทั้งหมด", type="primary")
+                submitted = st.form_submit_button("Save", type="primary")
                 if submitted:
                     try:
                         r = requests.put(f"{API_BASE}/companies/{cid}/forms", json={"data": form_inputs})
@@ -244,8 +243,7 @@ with tab1:
                         st.error(f"บันทึกไม่สำเร็จ: {detail}")
     else:
         st.info("ยังไม่มีบริษัทในระบบ")
-        if st.button("➕ Add First Company"):
-            add_company_dialog()
+
 
 # ---------- Tab 2: Workflow ----------
 with tab2:
@@ -270,7 +268,7 @@ with tab2:
         selected_month = st.selectbox("เลือกเดือน", options=months)
         selected_year = st.selectbox("เลือกปี", options=years, index=len(years) - 1)
 
-        if st.button("Start", type="primary"):
+        if st.button("Start Workflow", type="primary"):
             with st.spinner(f"Processing workflow for {selected_name} for {selected_month}/{selected_year}..."):
                 try:
                     r = requests.post(f"{API_BASE}/workflow/start", json={
