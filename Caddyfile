@@ -1,7 +1,7 @@
-api.byteduck.com {
+api.byteduck.io {
     reverse_proxy api:8000
 }
 
-app.byteduck.com {
+app.byteduck.io {
     reverse_proxy frontend:8501
 }
