@@ -123,8 +123,7 @@ def init_db():
         cur.execute("""
         CREATE TABLE IF NOT EXISTS line_groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id TEXT UNIQUE NOT NULL,
-            group_name TEXT
+            group_id TEXT UNIQUE NOT NULL
         )
         """)
 
@@ -209,7 +208,6 @@ class LineUser(BaseModel):
 class LineGroup(BaseModel):
     id: int
     group_id: str
-    group_name: str
 
 # ---------- New Helper Functions for PDF and LLM ----------
 def get_amount_from_gemini(file_content: bytes, prompt: str) -> str:
@@ -411,38 +409,10 @@ def line_webhook(payload: LineWebhook):
         # Handle bot joining a group or room
         elif event.type == "join":
             chat_id = event.source.groupId if event.source.groupId else event.source.roomId
-            if not chat_id:
-                return {"ok": True}
-
-            chat_name = f"Unknown Chat ({chat_id})"
-            headers = {"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
-
-            # Check if it's a group (ID starts with 'C')
-            if chat_id.startswith('C'):
-                summary_url = f"https://api.line.me/v2/bot/group/{chat_id}/summary"
-                try:
-                    res = requests.get(summary_url, headers=headers, timeout=5)
-                    res.raise_for_status()
-                    summary = res.json()
-                    chat_name = summary.get("groupName", f"Group ({chat_id})")
-                except requests.HTTPError as e:
-                    logging.error(f"Could not fetch LINE group summary for GID {chat_id}. Status: {e.response.status_code}, Response: {e.response.text}")
-                    chat_name = f"Group ({chat_id})" # Fallback name
-                except requests.RequestException as e:
-                    logging.error(f"A network error occurred while fetching LINE group summary for GID {chat_id}: {e}")
-                    chat_name = f"Group ({chat_id})" # Fallback name
-            
-            # Check if it's a room (ID starts with 'R')
-            elif chat_id.startswith('R'):
-                # Rooms do not have names, so we create a placeholder.
-                chat_name = f"Room ({chat_id})"
-
-            logging.info(f"Bot joined chat: {chat_name} ({chat_id})")
-            with get_conn() as conn:
-                conn.execute(
-                    "INSERT INTO line_groups (group_id, group_name) VALUES (?, ?) ON CONFLICT(group_id) DO UPDATE SET group_name=excluded.group_name",
-                    (chat_id, chat_name)
-                )
+            if chat_id:
+                logging.info(f"Bot joined chat: {chat_id}")
+                with get_conn() as conn:
+                    conn.execute("INSERT OR IGNORE INTO line_groups (group_id) VALUES (?)", (chat_id,))
 
         # Handle bot leaving a group or room
         elif event.type == "leave":
@@ -531,8 +501,8 @@ def list_line_users():
 def list_line_groups():
     """Lists all groups the LINE bot is currently a member of."""
     with get_conn() as conn:
-        rows = conn.execute("SELECT id, group_id, group_name FROM line_groups ORDER BY group_name").fetchall()
-        return [LineGroup(id=r["id"], group_id=r["group_id"], group_name=r["group_name"]) for r in rows]
+        rows = conn.execute("SELECT id, group_id FROM line_groups ORDER BY id").fetchall()
+        return [LineGroup(id=r["id"], group_id=r["group_id"]) for r in rows]
 
 
 # ---------- LINE Channel endpoints ----------
