@@ -278,13 +278,8 @@ with tab2:
                     }, stream=True)
                     r.raise_for_status()
                     
-                    content_disposition = r.headers.get('content-disposition')
-                    filename = "workflow_result.xlsx"
-                    if content_disposition:
-                        parts = content_disposition.split(';')
-                        for part in parts:
-                            if 'filename=' in part:
-                                filename = part.split('=')[1].strip('"')
+                    # Construct the filename directly on the frontend
+                    filename = f"{selected_name}_{selected_year}_{selected_month}_workflow.xlsx"
 
                     st.success("✅ Workflow complete!")
                     st.download_button(
@@ -354,13 +349,8 @@ with tab3:
                     }, stream=True)
                     r.raise_for_status()
                     
-                    content_disposition = r.headers.get('content-disposition')
-                    filename = "reconcile_result.xlsx"
-                    if content_disposition:
-                        parts = content_disposition.split(';')
-                        for part in parts:
-                            if 'filename=' in part:
-                                filename = part.split('=')[1].strip('"')
+                    # Construct the filename directly on the frontend
+                    filename = f"{selected_name}_{selected_year}_reconcile.xlsx"
 
                     st.success("✅ Reconcile complete!")
                     st.download_button(
