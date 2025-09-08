@@ -1,5 +1,6 @@
 from io import BytesIO
 from copy import copy
+from urllib.parse import quote
 from googleapiclient.http import MediaIoBaseDownload
 import google.generativeai as genai 
 import logging
@@ -833,7 +834,7 @@ def start_workflow(payload: WorkflowStart):
                                 except (ValueError, TypeError):
                                     amount = "Invalid Value"
                             vat_amounts[form_name] = amount
-                            break # Move to next row once a match is found
+                            # Do not break here, continue to find other forms in the file
 
     # Add bank data
     for bank in banks:
@@ -924,10 +925,16 @@ def start_workflow(payload: WorkflowStart):
     virtual_workbook.seek(0)
     filename = f"{company_name}_{payload.year}_{payload.month}_workflow.xlsx"
     logging.info(f"Returning Excel file: {filename}")
+    
+    # Properly encode filename for HTTP headers
+    encoded_filename = quote(filename)
+    
     return StreamingResponse(
         virtual_workbook,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        headers={'Content-Disposition': f'attachment; filename="{filename}"'} # Corrected header escaping
+        headers={
+            'Content-Disposition': f"attachment; filename*=UTF-8''{encoded_filename}"
+        }
     )
 
 # ---------- Reconcile endpoints ----------
@@ -1282,8 +1289,14 @@ def start_reconcile(payload: ReconcileStart):
     virtual_workbook.seek(0)
     filename = f"{company_name}_reconcile.xlsx"
     logging.info(f"Returning Excel file: {filename}")
+
+    # Properly encode filename for HTTP headers
+    encoded_filename = quote(filename)
+
     return StreamingResponse(
         virtual_workbook,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        headers={'Content-Disposition': f'attachment; filename="{filename}"'} # Corrected header escaping
+        headers={
+            'Content-Disposition': f"attachment; filename*=UTF-8''{encoded_filename}"
+        }
     )
