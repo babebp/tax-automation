@@ -119,9 +119,8 @@ with tab2:
     
     st.divider()
 
-    st.markdown("### จัดการรายชื่อผู้รับ (LINE User ID)")
-    st.markdown("เพิ่มหรือลบรายชื่อผู้รับข้อความ")
-
+    st.markdown("### จัดการรายชื่อผู้รับ")
+    
     # Fetch channels for dropdown
     try:
         channels_res = requests.get(f"{API_BASE}/line/channels")
@@ -134,10 +133,10 @@ with tab2:
         channel_map = {}
 
     if not channels:
-        st.warning("กรุณาเพิ่มช่องทางผู้ส่งก่อน เพื่อใช้ในการดึงข้อมูลโปรไฟล์ผู้รับ")
+        st.warning("กรุณาเพิ่มช่องทางผู้ส่งก่อน เพื่อใช้ในการจัดการผู้รับ")
     else:
         selected_channel_name_for_recipients = st.selectbox(
-            "เลือกช่องทางเพื่อแสดงข้อมูลผู้รับ", 
+            "เลือกช่องทางเพื่อจัดการผู้รับ", 
             options=list(channel_map.keys()),
             key="recipient_channel_select"
         )
@@ -145,6 +144,7 @@ with tab2:
         if selected_channel_name_for_recipients:
             selected_channel_id = channel_map[selected_channel_name_for_recipients]
             
+            st.markdown("**รายชื่อผู้รับปัจจุบัน**")
             # Fetch recipient details using the selected channel
             try:
                 recipients_res = requests.get(f"{API_BASE}/line/channels/{selected_channel_id}/recipients")
@@ -171,27 +171,64 @@ with tab2:
             else:
                 st.info("ยังไม่มีผู้รับในช่องทางนี้")
 
-    # Add new recipient
-    with st.form("add_recipient_form", clear_on_submit=True):
-        new_uid = st.text_input("LINE User ID", placeholder="U123456789...")
-        submitted = st.form_submit_button("➕ เพิ่มผู้รับ")
-        if submitted:
-            if not new_uid.strip():
-                st.error("กรุณาใส่ User ID")
-            elif 'selected_channel_id' not in locals() or not selected_channel_id:
-                st.error("กรุณาเลือกช่องทางด้านบนก่อนเพิ่มผู้รับ")
-            else:
+            st.divider()
+
+            # --- Add New Recipients ---
+            st.markdown("**เพิ่มผู้รับใหม่**")
+            
+            # Add by User ID
+            with st.form("add_user_form", clear_on_submit=True):
+                st.markdown("เพิ่มโดยใช้ User ID")
+                new_uid = st.text_input("LINE User ID", placeholder="U123456789...")
+                submitted_user = st.form_submit_button("➕ เพิ่มผู้ใช้")
+                if submitted_user:
+                    if not new_uid.strip():
+                        st.error("กรุณาใส่ User ID")
+                    else:
+                        try:
+                            add_res = requests.post(f"{API_BASE}/line/recipients", json={
+                                "channel_id": selected_channel_id, "uid": new_uid.strip()
+                            })
+                            add_res.raise_for_status()
+                            st.toast("เพิ่มผู้ใช้สำเร็จ", icon="✅")
+                            st.rerun()
+                        except requests.HTTPError as e:
+                            detail = e.response.json().get("detail", str(e))
+                            st.error(f"เพิ่มไม่สำเร็จ: {detail}")
+
+            # Add from list of Groups
+            with st.form("add_group_form"):
+                st.markdown("เพิ่มจากกลุ่มที่บอทเป็นสมาชิก")
                 try:
-                    add_res = requests.post(f"{API_BASE}/line/recipients", json={
-                        "channel_id": selected_channel_id,
-                        "uid": new_uid.strip()
-                    })
-                    add_res.raise_for_status()
-                    st.toast("เพิ่มผู้รับสำเร็จ", icon="✅")
-                    st.rerun()
-                except requests.HTTPError as e:
-                    detail = e.response.json().get("detail", str(e))
-                    st.error(f"เพิ่มไม่สำเร็จ: {detail}")
+                    groups_res = requests.get(f"{API_BASE}/line/groups")
+                    groups_res.raise_for_status()
+                    groups = groups_res.json()
+                    group_map = {g['group_name']: g['group_id'] for g in groups}
+                except Exception as e:
+                    st.error(f"ไม่สามารถโหลดรายชื่อกลุ่มได้: {e}")
+                    groups = []
+                    group_map = {}
+
+                if not groups:
+                    st.warning("บอทไม่ได้อยู่ในกลุ่มใดๆ")
+                else:
+                    selected_group_name = st.selectbox(
+                        "เลือกกลุ่มที่จะเพิ่ม", 
+                        options=list(group_map.keys())
+                    )
+                    submitted_group = st.form_submit_button("➕ เพิ่มกลุ่ม")
+                    if submitted_group and selected_group_name:
+                        group_id_to_add = group_map[selected_group_name]
+                        try:
+                            add_res = requests.post(f"{API_BASE}/line/recipients", json={
+                                "channel_id": selected_channel_id, "uid": group_id_to_add
+                            })
+                            add_res.raise_for_status()
+                            st.toast(f"เพิ่มกลุ่ม '{selected_group_name}' สำเร็จ", icon="✅")
+                            st.rerun()
+                        except requests.HTTPError as e:
+                            detail = e.response.json().get("detail", str(e))
+                            st.error(f"เพิ่มไม่สำเร็จ: {detail}")
 
 # --- Tab 3: Registered Users ---
 with tab3:

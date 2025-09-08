@@ -484,7 +484,7 @@ def delete_line_recipient(recipient_id: int):
 
 @app.get("/line/channels/{channel_id}/recipients", response_model=List[LineRecipientDetail])
 def get_recipient_details(channel_id: int):
-    """Gets details for all recipients using a specific channel to fetch profiles."""
+    """Gets details for all recipients (users and groups) for a specific channel."""
     with get_conn() as conn:
         channel_row = conn.execute("SELECT token FROM line_channels WHERE id = ?", (channel_id,)).fetchone()
         if not channel_row:
@@ -498,20 +498,28 @@ def get_recipient_details(channel_id: int):
 
     for r in recipient_rows:
         uid = r["uid"]
-        profile_url = f"https://api.line.me/v2/bot/profile/{uid}"
-        display_name = "(Profile not found)"
-        try:
-            res = requests.get(profile_url, headers=headers, timeout=5) # Add 5-second timeout
-            res.raise_for_status()
-            display_name = res.json().get("displayName", "(Name not available)")
-        except requests.Timeout:
-            logging.warning(f"Timeout while fetching profile for UID {uid}")
-            display_name = "(Profile fetch timed out)"
-        except requests.HTTPError as e:
-            logging.warning(f"Could not fetch profile for UID {uid}: {e.response.text}")
-        except Exception as e:
-            logging.error(f"An unexpected error occurred while fetching profile for UID {uid}: {e}")
+        display_name = f"({uid})" # Default display name
+
+        # If it's a user ID
+        if uid.startswith('U'):
+            profile_url = f"https://api.line.me/v2/bot/profile/{uid}"
+            try:
+                res = requests.get(profile_url, headers=headers, timeout=5)
+                res.raise_for_status()
+                display_name = res.json().get("displayName", "(Name not available)")
+            except requests.RequestException as e:
+                logging.warning(f"Could not fetch profile for UID {uid}: {e}")
+                display_name = "(Profile not found)"
         
+        # If it's a group ID
+        elif uid.startswith('C') or uid.startswith('R'):
+            with get_conn() as conn:
+                group_row = conn.execute("SELECT group_name FROM line_groups WHERE group_id = ?", (uid,)).fetchone()
+                if group_row and group_row["group_name"]:
+                    display_name = group_row["group_name"]
+                else:
+                    display_name = f"Group/Room ({uid})"
+
         detailed_recipients.append(
             LineRecipientDetail(id=r["id"], uid=uid, displayName=display_name)
         )
