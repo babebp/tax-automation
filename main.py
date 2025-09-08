@@ -119,13 +119,21 @@ def init_db():
             token TEXT NOT NULL
         )
         """)
+        # line_groups table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS line_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id TEXT UNIQUE NOT NULL
+        )
+        """)
 
 # ---------- Pydantic schemas ----------
 class CompanyCreate(BaseModel):
     name: str = Field(..., min_length=1)
 
 class LineEventSource(BaseModel):
-    userId: str
+    userId: Optional[str] = None
+    groupId: Optional[str] = None
 
 class LineEvent(BaseModel):
     type: str
@@ -195,6 +203,10 @@ class LineUser(BaseModel):
     id: int
     uid: str
     display_name: str
+
+class LineGroup(BaseModel):
+    id: int
+    group_id: str
 
 # ---------- New Helper Functions for PDF and LLM ----------
 def get_amount_from_gemini(file_content: bytes, prompt: str) -> str:
@@ -374,9 +386,9 @@ def upsert_company_forms(company_id: int, payload: FormsUpsert):
 def line_webhook(payload: LineWebhook):
     """Handles incoming LINE messages to capture user information."""
     for event in payload.events:
-        if event.type == "message":
+        # Handle user messages (direct 1-on-1 chat)
+        if event.type == "message" and event.source.userId:
             user_id = event.source.userId
-            # Fetch user profile from LINE API
             profile_url = f"https://api.line.me/v2/bot/profile/{user_id}"
             headers = {"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
             try:
@@ -385,7 +397,6 @@ def line_webhook(payload: LineWebhook):
                 profile = res.json()
                 display_name = profile.get("displayName", "Unknown")
                 
-                # Store user in the database, ignoring duplicates
                 with get_conn() as conn:
                     conn.execute(
                         "INSERT OR IGNORE INTO line_users (uid, display_name) VALUES (?, ?)",
@@ -393,6 +404,21 @@ def line_webhook(payload: LineWebhook):
                     )
             except requests.RequestException as e:
                 logging.error(f"Could not fetch LINE profile for UID {user_id}: {e}")
+
+        # Handle bot joining a group
+        elif event.type == "join" and event.source.groupId:
+            group_id = event.source.groupId
+            logging.info(f"Bot joined group: {group_id}")
+            with get_conn() as conn:
+                conn.execute("INSERT OR IGNORE INTO line_groups (group_id) VALUES (?)", (group_id,))
+
+        # Handle bot leaving a group
+        elif event.type == "leave" and event.source.groupId:
+            group_id = event.source.groupId
+            logging.info(f"Bot left group: {group_id}")
+            with get_conn() as conn:
+                conn.execute("DELETE FROM line_groups WHERE group_id = ?", (group_id,))
+
     return {"ok": True}
 
 @app.post("/line/recipients", response_model=LineRecipient)
@@ -466,6 +492,14 @@ def list_line_users():
     with get_conn() as conn:
         rows = conn.execute("SELECT id, uid, display_name FROM line_users ORDER BY display_name").fetchall()
         return [LineUser(id=r["id"], uid=r["uid"], display_name=r["display_name"]) for r in rows]
+
+
+@app.get("/line/groups", response_model=List[LineGroup])
+def list_line_groups():
+    """Lists all groups the LINE bot is currently a member of."""
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, group_id FROM line_groups ORDER BY id").fetchall()
+        return [LineGroup(id=r["id"], group_id=r["group_id"]) for r in rows]
 
 
 # ---------- LINE Channel endpoints ----------

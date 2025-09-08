@@ -39,7 +39,7 @@ def add_channel_dialog():
 st.subheader("LINE Message Management")
 
 # Create tabs
-tab1, tab2, tab3 = st.tabs(["Send Message", "Manage Recipients", "Registered Users"])
+tab1, tab2, tab3, tab4 = st.tabs(["Send Message", "Manage Recipients", "Registered Users", "Active Groups"])
 
 # --- Tab 1: Send Message ---
 with tab1:
@@ -216,6 +216,31 @@ with tab3:
     except requests.HTTPError as e:
         detail = e.response.json().get("detail", str(e))
         st.error(f"ไม่สามารถโหลดรายชื่อผู้ใช้ได้: {detail}")
+    except Exception as e:
+        st.error(f"เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
+
+# --- Tab 4: Active Groups ---
+with tab4:
+    st.markdown("### กลุ่มที่บอทเป็นสมาชิกอยู่")
+    st.markdown("รายชื่อกลุ่มทั้งหมดที่บอทเป็นสมาชิกอยู่ ณ ปัจจุบัน")
+
+    try:
+        groups_res = requests.get(f"{API_BASE}/line/groups")
+        groups_res.raise_for_status()
+        groups = groups_res.json()
+        
+        if groups:
+            # Prepare data for display
+            group_data = {
+                "Group ID": [g["group_id"] for g in groups]
+            }
+            st.dataframe(group_data, use_container_width=True)
+        else:
+            st.info("บอทไม่ได้อยู่ในกลุ่มใดๆ")
+
+    except requests.HTTPError as e:
+        detail = e.response.json().get("detail", str(e))
+        st.error(f"ไม่สามารถโหลดรายชื่อกลุ่มได้: {detail}")
     except Exception as e:
         st.error(f"เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
 
