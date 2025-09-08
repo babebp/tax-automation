@@ -100,10 +100,7 @@ def init_db():
         cur.execute("""
         CREATE TABLE IF NOT EXISTS line_recipients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_id INTEGER NOT NULL,
-            uid TEXT NOT NULL,
-            UNIQUE(channel_id, uid),
-            FOREIGN KEY(channel_id) REFERENCES line_channels(id) ON DELETE CASCADE
+            uid TEXT NOT NULL UNIQUE
         )
         """)
         cur.execute("""
@@ -177,12 +174,10 @@ class ReconcileStart(BaseModel):
     parts: List[str]
 
 class LineRecipientCreate(BaseModel):
-    channel_id: int
     uid: str = Field(..., min_length=1)
 
 class LineRecipient(BaseModel):
     id: int
-    channel_id: int
     uid: str
 
 class LineRecipientDetail(BaseModel):
@@ -458,21 +453,16 @@ def line_webhook(payload: LineWebhook):
 
 @app.post("/line/recipients", response_model=LineRecipient)
 def add_line_recipient(payload: LineRecipientCreate):
-    """Adds a new LINE recipient to a specific channel."""
+    """Adds a new global LINE recipient."""
     with get_conn() as conn:
-        # Check if channel exists
-        channel = conn.execute("SELECT id FROM line_channels WHERE id = ?", (payload.channel_id,)).fetchone()
-        if not channel:
-            raise HTTPException(status_code=404, detail="Channel not found.")
-        
         try:
-            cur = conn.execute("INSERT INTO line_recipients(channel_id, uid) VALUES (?, ?)", (payload.channel_id, payload.uid.strip()))
+            cur = conn.execute("INSERT INTO line_recipients(uid) VALUES (?)", (payload.uid.strip(),))
             rid = cur.lastrowid
         except sqlite3.IntegrityError:
-            raise HTTPException(status_code=400, detail="Recipient UID already exists for this channel.")
+            raise HTTPException(status_code=400, detail="Recipient UID already exists.")
         
-        row = conn.execute("SELECT id, channel_id, uid FROM line_recipients WHERE id = ?", (rid,)).fetchone()
-        return LineRecipient(id=row["id"], channel_id=row["channel_id"], uid=row["uid"])
+        row = conn.execute("SELECT id, uid FROM line_recipients WHERE id = ?", (rid,)).fetchone()
+        return LineRecipient(id=row["id"], uid=row["uid"])
 
 @app.delete("/line/recipients/{recipient_id}")
 def delete_line_recipient(recipient_id: int):
@@ -484,16 +474,21 @@ def delete_line_recipient(recipient_id: int):
         conn.execute("DELETE FROM line_recipients WHERE id = ?", (recipient_id,))
         return {"ok": True}
 
-@app.get("/line/channels/{channel_id}/recipients", response_model=List[LineRecipientDetail])
-def get_recipient_details(channel_id: int):
-    """Gets details for all recipients (users and groups) for a specific channel."""
+@app.get("/line/recipients/details", response_model=List[LineRecipientDetail])
+def get_recipient_details():
+    """Gets details for all global recipients (users and groups)."""
+    access_token = None
     with get_conn() as conn:
-        channel_row = conn.execute("SELECT token FROM line_channels WHERE id = ?", (channel_id,)).fetchone()
-        if not channel_row:
-            raise HTTPException(status_code=404, detail="LINE channel not found.")
-        access_token = channel_row["token"]
+        # Use the token from the first available channel to resolve names
+        first_channel = conn.execute("SELECT token FROM line_channels LIMIT 1").fetchone()
+        if first_channel:
+            access_token = first_channel["token"]
+        
+        recipient_rows = conn.execute("SELECT id, uid FROM line_recipients").fetchall()
 
-        recipient_rows = conn.execute("SELECT id, uid FROM line_recipients WHERE channel_id = ?", (channel_id,)).fetchall()
+    if not access_token:
+        # If there's no channel, we can't resolve names, but we can still return UIDs
+        return [LineRecipientDetail(id=r["id"], uid=r["uid"], displayName=f"({r['uid']})") for r in recipient_rows]
 
     headers = {"Authorization": f"Bearer {access_token}"}
     detailed_recipients = []
@@ -586,8 +581,8 @@ def send_line_message(payload: LineMessage):
             raise HTTPException(status_code=404, detail="LINE channel not found.")
         access_token = channel_row["token"]
 
-        # Get recipient UIDs for the specific channel
-        rows = conn.execute("SELECT uid FROM line_recipients WHERE channel_id = ?", (payload.channel_id,)).fetchall()
+        # Get all global recipient UIDs
+        rows = conn.execute("SELECT uid FROM line_recipients").fetchall()
         uids = [r["uid"] for r in rows]
 
     if not uids:
