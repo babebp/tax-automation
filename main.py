@@ -384,21 +384,24 @@ def upsert_company_forms(company_id: int, payload: FormsUpsert):
 @app.post("/line/webhook")
 def line_webhook(payload: LineWebhook):
     """Handles incoming LINE messages to capture user information."""
-    # Use the token from the first channel in the DB for webhook operations
+    # Fetch all channel tokens to try them for API calls.
     with get_conn() as conn:
-        channel_row = conn.execute("SELECT token FROM line_channels ORDER BY id LIMIT 1").fetchone()
-        if not channel_row:
+        channel_rows = conn.execute("SELECT token FROM line_channels ORDER BY id").fetchall()
+        if not channel_rows:
             logging.error("LINE webhook called, but no channels are configured in the database.")
-            # Return a 200 to LINE so it doesn't retry, but log the issue.
             return {"ok": True, "detail": "No channels configured."}
-        access_token = channel_row["token"]
+        access_tokens = [row["token"] for row in channel_rows]
 
     for event in payload.events:
+        # For events that require an API call back to LINE, we might need to try multiple tokens.
+        # The first token is used for user profiles as a default.
+        default_token = access_tokens[0]
+
         # Handle user messages (direct 1-on-1 chat)
         if event.type == "message" and event.source.userId:
             user_id = event.source.userId
             profile_url = f"https://api.line.me/v2/bot/profile/{user_id}"
-            headers = {"Authorization": f"Bearer {access_token}"}
+            headers = {"Authorization": f"Bearer {default_token}"}
             try:
                 res = requests.get(profile_url, headers=headers, timeout=5)
                 res.raise_for_status()
@@ -411,7 +414,7 @@ def line_webhook(payload: LineWebhook):
                         (user_id, display_name)
                     )
             except requests.RequestException as e:
-                logging.error(f"Could not fetch LINE profile for UID {user_id}: {e}")
+                logging.error(f"Could not fetch LINE profile for UID {user_id} with default token: {e}")
 
         # Handle bot joining a group or room
         elif event.type == "join":
@@ -420,26 +423,31 @@ def line_webhook(payload: LineWebhook):
                 return {"ok": True}
 
             chat_name = f"Unknown Chat ({chat_id})"
-            headers = {"Authorization": f"Bearer {access_token}"}
-
+            
             # Check if it's a group (ID starts with 'C')
             if chat_id.startswith('C'):
                 summary_url = f"https://api.line.me/v2/bot/group/{chat_id}/summary"
-                try:
-                    res = requests.get(summary_url, headers=headers, timeout=5)
-                    res.raise_for_status()
-                    summary = res.json()
-                    chat_name = summary.get("groupName", f"Group ({chat_id})")
-                except requests.HTTPError as e:
-                    logging.error(f"Could not fetch LINE group summary for GID {chat_id}. Status: {e.response.status_code}, Response: {e.response.text}")
-                    chat_name = f"Group ({chat_id})" # Fallback name
-                except requests.RequestException as e:
-                    logging.error(f"A network error occurred while fetching LINE group summary for GID {chat_id}: {e}")
-                    chat_name = f"Group ({chat_id})" # Fallback name
-            
+                
+                # Iterate through all tokens to find one that can access the group summary
+                for token in access_tokens:
+                    headers = {"Authorization": f"Bearer {token}"}
+                    try:
+                        res = requests.get(summary_url, headers=headers, timeout=5)
+                        if res.status_code == 200:
+                            summary = res.json()
+                            chat_name = summary.get("groupName", f"Group ({chat_id})")
+                            logging.info(f"Successfully fetched group name for {chat_id} using a token.")
+                            break # Success, exit the loop
+                        else:
+                            # Log non-200 responses that aren't fatal, but move to the next token
+                            logging.warning(f"Attempt to fetch group summary for {chat_id} with a token failed with status {res.status_code}.")
+                    except requests.RequestException as e:
+                        logging.error(f"A network error occurred while trying a token for GID {chat_id}: {e}")
+                else: # This 'else' belongs to the 'for' loop
+                    logging.error(f"Failed to fetch group summary for {chat_id} with any of the available tokens.")
+
             # Check if it's a room (ID starts with 'R')
             elif chat_id.startswith('R'):
-                # Rooms do not have names, so we create a placeholder.
                 chat_name = f"Room ({chat_id})"
 
             logging.info(f"Bot joined chat: {chat_name} ({chat_id})")
