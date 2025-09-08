@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 import os
 import pandas as pd
 import requests
+from datetime import datetime
+
 
 load_dotenv() # Load environment variables from .env file
 
@@ -1157,20 +1159,38 @@ def start_reconcile(payload: ReconcileStart):
                         if sheet.max_column < 9:
                            sheet.cell(row=1, column=9).value = 'Calculated Total'
 
-                        for row_idx in range(2, sheet.max_row + 1):
+                        for row_idx in range(0, sheet.max_row + 1): # Start from row 1 to include header
                             try:
                                 val_g = sheet.cell(row=row_idx, column=7).value
                                 val_h = sheet.cell(row=row_idx, column=8).value
                                 num_g = float(val_g) if val_g is not None else 0
-                                num_h = float(val_h) if val_h is not None else 0
-                                total_i = num_g + num_h
-                                sheet.cell(row=row_idx, column=9).value = total_i
+                                num_h = -1 * float(val_h) if val_h is not None else 0
+                                total = num_g + num_h # Changed to subtraction
+                                # sheet.cell(row=row_idx, column=9).value = total_i
 
                                 date_cell = sheet.cell(row=row_idx, column=3).value
-                                if date_cell and hasattr(date_cell, 'month'):
+                                month = None
+                                if isinstance(date_cell, datetime):
                                     month = date_cell.month
-                                    monthly_totals[month] += total_i
+                                elif isinstance(date_cell, str):
+                                    try:
+                                        # Attempt to parse a string into a datetime object.
+                                        # This handles common formats like 'YYYY-MM-DD' or 'DD/MM/YYYY'.
+                                        # It splits on space to handle cases with timestamps like 'YYYY-MM-DD HH:MM:SS'
+                                        date_str = date_cell.split()[0]
+                                        if '-' in date_str:
+                                            month = datetime.strptime(date_str, '%Y-%m-%d').month
+                                        elif '/' in date_str:
+                                            month = datetime.strptime(date_str, '%d/%m/%Y').month
+                                    except ValueError:
+                                        # If parsing fails, print a warning and skip to the next row.
+                                        # print(f"Skipping row {row_idx}: Could not parse date string '{date_cell}'")
+                                        continue
+                                
+                                if month:
+                                    monthly_totals[month] += total
                             except (ValueError, TypeError):
+                                # This will catch errors from float conversion on header row
                                 continue
                         return monthly_totals
 
