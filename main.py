@@ -135,6 +135,7 @@ class CompanyCreate(BaseModel):
 class LineEventSource(BaseModel):
     userId: Optional[str] = None
     groupId: Optional[str] = None
+    roomId: Optional[str] = None
 
 class LineEvent(BaseModel):
     type: str
@@ -407,37 +408,49 @@ def line_webhook(payload: LineWebhook):
             except requests.RequestException as e:
                 logging.error(f"Could not fetch LINE profile for UID {user_id}: {e}")
 
-        # Handle bot joining a group
-        elif event.type == "join" and event.source.groupId:
-            group_id = event.source.groupId
-            group_name = "Unknown Group"
-            # Fetch group summary to get the name
-            summary_url = f"https://api.line.me/v2/bot/group/{group_id}/summary"
-            headers = {"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
-            try:
-                res = requests.get(summary_url, headers=headers, timeout=5)
-                res.raise_for_status()
-                summary = res.json()
-                group_name = summary.get("groupName", "Unknown Group")
-            except requests.HTTPError as e:
-                # Log the detailed error from the LINE API
-                logging.error(f"Could not fetch LINE group summary for GID {group_id}. Status: {e.response.status_code}, Response: {e.response.text}")
-            except requests.RequestException as e:
-                logging.error(f"A network error occurred while fetching LINE group summary for GID {group_id}: {e}")
+        # Handle bot joining a group or room
+        elif event.type == "join":
+            chat_id = event.source.groupId if event.source.groupId else event.source.roomId
+            if not chat_id:
+                return {"ok": True}
 
-            logging.info(f"Bot joined group: {group_name} ({group_id})")
+            chat_name = f"Unknown Chat ({chat_id})"
+            headers = {"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
+
+            # Check if it's a group (ID starts with 'C')
+            if chat_id.startswith('C'):
+                summary_url = f"https://api.line.me/v2/bot/group/{chat_id}/summary"
+                try:
+                    res = requests.get(summary_url, headers=headers, timeout=5)
+                    res.raise_for_status()
+                    summary = res.json()
+                    chat_name = summary.get("groupName", f"Group ({chat_id})")
+                except requests.HTTPError as e:
+                    logging.error(f"Could not fetch LINE group summary for GID {chat_id}. Status: {e.response.status_code}, Response: {e.response.text}")
+                    chat_name = f"Group ({chat_id})" # Fallback name
+                except requests.RequestException as e:
+                    logging.error(f"A network error occurred while fetching LINE group summary for GID {chat_id}: {e}")
+                    chat_name = f"Group ({chat_id})" # Fallback name
+            
+            # Check if it's a room (ID starts with 'R')
+            elif chat_id.startswith('R'):
+                # Rooms do not have names, so we create a placeholder.
+                chat_name = f"Room ({chat_id})"
+
+            logging.info(f"Bot joined chat: {chat_name} ({chat_id})")
             with get_conn() as conn:
                 conn.execute(
                     "INSERT INTO line_groups (group_id, group_name) VALUES (?, ?) ON CONFLICT(group_id) DO UPDATE SET group_name=excluded.group_name",
-                    (group_id, group_name)
+                    (chat_id, chat_name)
                 )
 
-        # Handle bot leaving a group
-        elif event.type == "leave" and event.source.groupId:
-            group_id = event.source.groupId
-            logging.info(f"Bot left group: {group_id}")
-            with get_conn() as conn:
-                conn.execute("DELETE FROM line_groups WHERE group_id = ?", (group_id,))
+        # Handle bot leaving a group or room
+        elif event.type == "leave":
+            chat_id = event.source.groupId if event.source.groupId else event.source.roomId
+            if chat_id:
+                logging.info(f"Bot left chat: {chat_id}")
+                with get_conn() as conn:
+                    conn.execute("DELETE FROM line_groups WHERE group_id = ?", (chat_id,))
 
     return {"ok": True}
 
