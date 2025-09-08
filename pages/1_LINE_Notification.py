@@ -136,19 +136,33 @@ with tab2:
         # --- Add New Recipients ---
         st.markdown("**เพิ่มผู้รับใหม่**")
         
-        # Add by User ID
-        with st.form("add_user_form", clear_on_submit=True):
-            st.markdown("เพิ่มโดยใช้ User ID")
-            new_uid = st.text_input("LINE User ID", placeholder="U123456789...")
-            submitted_user = st.form_submit_button("➕ เพิ่มผู้ใช้")
-            if submitted_user:
-                if not new_uid.strip():
-                    st.error("กรุณาใส่ User ID")
-                else:
+        # Add from list of registered users
+        st.markdown("เพิ่มจากผู้ใช้ที่ลงทะเบียน")
+        try:
+            users_res = requests.get(f"{API_BASE}/line/users")
+            users_res.raise_for_status()
+            users = users_res.json()
+            user_map = {u['display_name']: u['uid'] for u in users}
+        except Exception as e:
+            st.error(f"ไม่สามารถโหลดรายชื่อผู้ใช้ได้: {e}")
+            users = []
+            user_map = {}
+
+        if not users:
+            st.warning("ยังไม่มีผู้ใช้ที่ลงทะเบียน (ผู้ใช้ต้องเคยส่งข้อความหาบอทก่อน)")
+        else:
+            with st.form("add_user_form"):
+                selected_user_name = st.selectbox(
+                    "เลือกผู้ใช้ที่จะเพิ่ม",
+                    options=list(user_map.keys())
+                )
+                submitted_user = st.form_submit_button("➕ เพิ่มผู้ใช้")
+                if submitted_user and selected_user_name:
+                    user_id_to_add = user_map[selected_user_name]
                     try:
-                        add_res = requests.post(f"{API_BASE}/line/recipients", json={"uid": new_uid.strip()})
+                        add_res = requests.post(f"{API_BASE}/line/recipients", json={"uid": user_id_to_add})
                         add_res.raise_for_status()
-                        st.toast("เพิ่มผู้ใช้สำเร็จ", icon="✅")
+                        st.toast(f"เพิ่มผู้ใช้ '{selected_user_name}' สำเร็จ", icon="✅")
                         st.rerun()
                     except requests.HTTPError as e:
                         detail = e.response.json().get("detail", str(e))
