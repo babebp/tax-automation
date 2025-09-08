@@ -232,7 +232,8 @@ with tab4:
         if groups:
             # Prepare data for display
             group_data = {
-                "Group ID": [g["group_id"] for g in groups]
+                "Group ID": [g["group_id"] for g in groups],
+                "Group Name": [g["group_name"] for g in groups]
             }
             st.dataframe(group_data, use_container_width=True)
         else:
