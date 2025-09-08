@@ -419,8 +419,11 @@ def line_webhook(payload: LineWebhook):
                 res.raise_for_status()
                 summary = res.json()
                 group_name = summary.get("groupName", "Unknown Group")
+            except requests.HTTPError as e:
+                # Log the detailed error from the LINE API
+                logging.error(f"Could not fetch LINE group summary for GID {group_id}. Status: {e.response.status_code}, Response: {e.response.text}")
             except requests.RequestException as e:
-                logging.error(f"Could not fetch LINE group summary for GID {group_id}: {e}")
+                logging.error(f"A network error occurred while fetching LINE group summary for GID {group_id}: {e}")
 
             logging.info(f"Bot joined group: {group_name} ({group_id})")
             with get_conn() as conn:
