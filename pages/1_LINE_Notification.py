@@ -62,10 +62,9 @@ with tab1:
         selected_channel_name = st.selectbox("เลือกช่องทางที่จะใช้ส่ง", options=list(channel_map.keys()), key="send_msg_channel")
         selected_channel_id = channel_map.get(selected_channel_name)
 
-        # Fetch registered users for the selected channel
+        # Fetch all registered users (now a global list)
         try:
-            params = {"channel_id": selected_channel_id} if selected_channel_id else {}
-            all_users_res = requests.get(f"{API_BASE}/line/users", params=params)
+            all_users_res = requests.get(f"{API_BASE}/line/users")
             all_users_res.raise_for_status()
             all_users = all_users_res.json()
             all_user_map = {u['display_name']: u['uid'] for u in all_users}
@@ -159,25 +158,23 @@ with tab2:
     if st.button("➕ Add Line Channel"):
         add_channel_dialog()
 
-    # Channel selector for filtering users and groups
+    # Channel selector for filtering groups (users are now global)
+    selected_channel_id_for_groups = None
     if channels:
         channel_names = ["All Channels"] + [ch['name'] for ch in channels]
-        selected_channel_name = st.selectbox("Select a channel to view information", options=channel_names)
+        selected_channel_name_for_groups = st.selectbox("Select a channel to view its groups", options=channel_names)
 
-        selected_channel_id = None
-        if selected_channel_name != "All Channels":
-            selected_channel_id = next((ch['id'] for ch in channels if ch['name'] == selected_channel_name), None)
-    else:
-        selected_channel_id = None
-
+        if selected_channel_name_for_groups != "All Channels":
+            selected_channel_id_for_groups = next((ch['id'] for ch in channels if ch['name'] == selected_channel_name_for_groups), None)
+    
     col1, col2 = st.columns(2)
 
     with col1:
         st.markdown("### All users registered via LINE")
-        st.markdown("_A list of all users who have ever sent a message to the bot_")
+        st.markdown("_A global list of all users who have ever sent a message to any bot_")
         try:
-            params = {"channel_id": selected_channel_id} if selected_channel_id else {}
-            users_res = requests.get(f"{API_BASE}/line/users", params=params)
+            # Fetch the global list of users, no params needed
+            users_res = requests.get(f"{API_BASE}/line/users")
             users_res.raise_for_status()
             users = users_res.json()
             if users:
@@ -193,9 +190,9 @@ with tab2:
 
     with col2:
         st.markdown("### Groups the bot is a member of")
-        st.markdown("_A list of all groups the bot is currently a member of_")
+        st.markdown("_A list of all groups the bot is currently a member of (filtered by channel)_")
         try:
-            params = {"channel_id": selected_channel_id} if selected_channel_id else {}
+            params = {"channel_id": selected_channel_id_for_groups} if selected_channel_id_for_groups else {}
             groups_res = requests.get(f"{API_BASE}/line/groups", params=params)
             groups_res.raise_for_status()
             groups = groups_res.json()
@@ -203,7 +200,7 @@ with tab2:
                 group_data = {"Group ID": [g["group_id"] for g in groups], "Group Name": [g["group_name"] for g in groups]}
                 st.dataframe(group_data, use_container_width=True)
             else:
-                st.info("The bot is not in any groups")
+                st.info("The bot is not in any groups (or no channel is selected)")
         except requests.HTTPError as e:
             detail = e.response.json().get("detail", str(e))
             st.error(f"Could not load group list: {detail}")

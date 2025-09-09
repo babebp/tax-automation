@@ -101,14 +101,15 @@ def init_db():
         # Drop the old line_recipients table if it exists for a clean slate
         cur.execute("DROP TABLE IF EXISTS line_recipients")
         
+        # Drop the old user table to redefine it
+        cur.execute("DROP TABLE IF EXISTS line_users")
+        
+        # Create a new, global user table without channel_id
         cur.execute("""
         CREATE TABLE IF NOT EXISTS line_users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid TEXT NOT NULL,
-            display_name TEXT NOT NULL,
-            channel_id INTEGER NOT NULL,
-            UNIQUE(uid, channel_id),
-            FOREIGN KEY(channel_id) REFERENCES line_channels(id) ON DELETE CASCADE
+            uid TEXT UNIQUE NOT NULL,
+            display_name TEXT NOT NULL
         )
         """)
         # line_channels table
@@ -199,7 +200,6 @@ class LineUser(BaseModel):
     id: int
     uid: str
     display_name: str
-    channel_id: int
 
 class LineGroup(BaseModel):
     id: int
@@ -402,96 +402,106 @@ def upsert_company_forms(company_id: int, payload: FormsUpsert):
 def line_webhook(payload: LineWebhook):
     """Handles incoming LINE messages to capture user information."""
     with get_conn() as conn:
-        all_channels = conn.execute("SELECT id, token, channel_id_line FROM line_channels").fetchall()
+        all_channels = conn.execute("SELECT id, name, token FROM line_channels").fetchall()
         if not all_channels:
             logging.error("Webhook called, but no channels are configured.")
             return {"ok": False, "detail": "No channels configured"}
 
     for event in payload.events:
-        # Handle user messages (direct 1-on-1 chat)
-        if event.type == "message" and event.source.userId:
-            user_id = event.source.userId
-            registered_channel_id = None
+        logging.info(f"Received LINE event: type={event.type}, userId={event.source.userId}, groupId={event.source.groupId}")
+
+        # --- New Logic: Iterate through channels and test token viability ---
+        target_channel = None
+        user_id = event.source.userId
+        chat_id = event.source.groupId if event.source.groupId else event.source.roomId
+
+        # Try to find the correct channel by checking which one can access the user/group info
+        for ch in all_channels:
+            access_token = ch["token"]
+            headers = {"Authorization": f"Bearer {access_token}"}
             
-            # Iterate through all channels to find which one this user is interacting with
-            for ch in all_channels:
-                access_token = ch["token"]
+            # If it's a user event, try fetching the user's profile
+            if user_id and not chat_id:
                 profile_url = f"https://api.line.me/v2/bot/profile/{user_id}"
-                headers = {"Authorization": f"Bearer {access_token}"}
                 try:
-                    res = requests.get(profile_url, headers=headers, timeout=3)
+                    res = requests.get(profile_url, headers=headers, timeout=2)
                     if res.status_code == 200:
-                        profile = res.json()
-                        display_name = profile.get("displayName", "Unknown")
-                        registered_channel_id = ch["id"]
-                        
-                        with get_conn() as conn:
-                            conn.execute(
-                                "INSERT INTO line_users (uid, display_name, channel_id) VALUES (?, ?, ?) ON CONFLICT(uid, channel_id) DO NOTHING",
-                                (user_id, display_name, registered_channel_id)
-                            )
-                        logging.info(f"Successfully registered user {display_name} ({user_id}) for channel {registered_channel_id}.")
-                        break # Found the correct channel, no need to check others
+                        target_channel = ch
+                        logging.info(f"Successfully validated token for channel '{ch['name']}' (ID: {ch['id']}) with user {user_id}.")
+                        break # Found the correct channel
                 except requests.RequestException:
-                    # This is expected to fail for channels the user hasn't interacted with
-                    continue
+                    continue # Try next token
             
-            if not registered_channel_id:
-                logging.error(f"Received a message from user {user_id}, but could not associate them with any known channel.")
-
-        # Handle bot joining a group or room
-        elif event.type == "join":
-            chat_id = event.source.groupId if event.source.groupId else event.source.roomId
-            if not chat_id:
-                continue
-
-            chat_name = f"Unknown Chat ({chat_id})"
-            joined_channel_id = None
-
-            # Iterate through all channels to find which one can access the group
-            for ch in all_channels:
-                current_token = ch["token"]
+            # If it's a group event, try fetching group summary
+            elif chat_id:
                 summary_url = f"https://api.line.me/v2/bot/group/{chat_id}/summary"
-                headers = {"Authorization": f"Bearer {current_token}"}
                 try:
-                    res = requests.get(summary_url, headers=headers, timeout=3)
+                    res = requests.get(summary_url, headers=headers, timeout=2)
                     if res.status_code == 200:
-                        summary = res.json()
-                        chat_name = summary.get("groupName", f"Group ({chat_id})")
-                        joined_channel_id = ch["id"]
-                        logging.info(f"Bot from channel ID {joined_channel_id} joined group '{chat_name}' ({chat_id}).")
-                        break
+                        target_channel = ch
+                        logging.info(f"Successfully validated token for channel '{ch['name']}' (ID: {ch['id']}) with group {chat_id}.")
+                        break # Found the correct channel
                 except requests.RequestException:
-                    continue
+                    continue # Try next token
+
+        if not target_channel:
+            logging.warning(f"Could not find a channel with a valid token to handle event for user '{user_id}' or group '{chat_id}'.")
+            continue # Skip to the next event
+
+        # --- Proceed with the identified channel ---
+        registered_channel_id = target_channel["id"]
+        access_token = target_channel["token"]
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        # Handle user messages (direct 1-on-1 chat)
+        if event.type == "message" and user_id:
+            profile_url = f"https://api.line.me/v2/bot/profile/{user_id}"
+            try:
+                res = requests.get(profile_url, headers=headers, timeout=3)
+                res.raise_for_status()
+                profile = res.json()
+                display_name = profile.get("displayName", "Unknown")
+                
+                with get_conn() as conn:
+                    conn.execute(
+                        "INSERT INTO line_users (uid, display_name) VALUES (?, ?) ON CONFLICT(uid) DO UPDATE SET display_name=excluded.display_name",
+                        (user_id, display_name)
+                    )
+                logging.info(f"Successfully registered/updated global user '{display_name}' ({user_id}).")
+            except requests.RequestException as e:
+                logging.error(f"Could not fetch LINE profile for UID {user_id} on channel {registered_channel_id}: {e}")
             
-            if joined_channel_id:
+        # Handle bot joining a group or room
+        elif event.type == "join" and chat_id:
+            summary_url = f"https://api.line.me/v2/bot/group/{chat_id}/summary"
+            try:
+                res = requests.get(summary_url, headers=headers, timeout=3)
+                res.raise_for_status()
+                summary = res.json()
+                chat_name = summary.get("groupName", f"Group ({chat_id})")
                 with get_conn() as conn:
                     conn.execute(
                         "INSERT INTO line_groups (group_id, group_name, channel_id) VALUES (?, ?, ?) ON CONFLICT(group_id, channel_id) DO UPDATE SET group_name=excluded.group_name",
-                        (chat_id, chat_name, joined_channel_id)
+                        (chat_id, chat_name, registered_channel_id)
                     )
-            else:
-                logging.error(f"Bot joined group {chat_id}, but could not determine which channel it was.")
-
+                logging.info(f"Bot from channel '{target_channel['name']}' joined group '{chat_name}' ({chat_id}).")
+            except requests.RequestException as e:
+                logging.error(f"Could not fetch LINE group summary for GID {chat_id} on channel {registered_channel_id}: {e}")
+            
         # Handle bot leaving a group or room
-        elif event.type == "leave":
-            chat_id = event.source.groupId if event.source.groupId else event.source.roomId
-            if chat_id:
-                logging.info(f"Bot left chat: {chat_id}. Removing from all associated channels.")
-                with get_conn() as conn:
-                    conn.execute("DELETE FROM line_groups WHERE group_id = ?", (chat_id,))
+        elif event.type == "leave" and chat_id:
+            logging.info(f"Bot left chat: {chat_id} for channel {registered_channel_id}. Removing from DB.")
+            with get_conn() as conn:
+                conn.execute("DELETE FROM line_groups WHERE group_id = ? AND channel_id = ?", (chat_id, registered_channel_id))
 
     return {"ok": True}
 
 @app.get("/line/users", response_model=List[LineUser])
-def list_line_users(channel_id: Optional[int] = None):
-    """Lists all unique LINE users who have interacted with the bot."""
+def list_line_users():
+    """Lists all unique LINE users who have interacted with any bot."""
     with get_conn() as conn:
-        if channel_id:
-            rows = conn.execute("SELECT id, uid, display_name, channel_id FROM line_users WHERE channel_id = ? ORDER BY display_name", (channel_id,)).fetchall()
-        else:
-            rows = conn.execute("SELECT id, uid, display_name, channel_id FROM line_users ORDER BY display_name").fetchall()
-        return [LineUser(id=r["id"], uid=r["uid"], display_name=r["display_name"], channel_id=r["channel_id"]) for r in rows]
+        rows = conn.execute("SELECT id, uid, display_name FROM line_users ORDER BY display_name").fetchall()
+        return [LineUser(id=r["id"], uid=r["uid"], display_name=r["display_name"]) for r in rows]
 
 
 @app.get("/line/groups", response_model=List[LineGroup])
