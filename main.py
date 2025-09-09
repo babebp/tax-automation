@@ -401,53 +401,43 @@ def upsert_company_forms(company_id: int, payload: FormsUpsert):
 @app.post("/line/webhook")
 def line_webhook(payload: LineWebhook):
     """Handles incoming LINE messages to capture user information."""
-    # For message events, we can identify the channel directly.
-    # For join/leave events, we need to deduce the channel.
-    destination = payload.destination
-
     with get_conn() as conn:
-        # Fetch all channels for join/leave event processing
         all_channels = conn.execute("SELECT id, token, channel_id_line FROM line_channels").fetchall()
         if not all_channels:
             logging.error("Webhook called, but no channels are configured.")
             return {"ok": False, "detail": "No channels configured"}
 
     for event in payload.events:
-        channel_id = None
-        access_token = None
-
-        # 1. Identify the channel for the event
-        if event.type == "message" and destination:
-            # For messages, the destination is reliable
-            channel_info = next((ch for ch in all_channels if ch["channel_id_line"] == destination), None)
-            if channel_info:
-                channel_id = channel_info["id"]
-                access_token = channel_info["token"]
-        # For other events like join/leave, we'll determine the channel inside the loop
-        
-        if not access_token and event.type != "join" and event.type != "leave":
-             logging.warning(f"Could not determine channel for event type {event.type}")
-             continue # Skip to next event if we can't identify the channel
-
-        # 2. Process the event
         # Handle user messages (direct 1-on-1 chat)
-        if event.type == "message" and event.source.userId and channel_id:
+        if event.type == "message" and event.source.userId:
             user_id = event.source.userId
-            profile_url = f"https://api.line.me/v2/bot/profile/{user_id}"
-            headers = {"Authorization": f"Bearer {access_token}"}
-            try:
-                res = requests.get(profile_url, headers=headers, timeout=5)
-                res.raise_for_status()
-                profile = res.json()
-                display_name = profile.get("displayName", "Unknown")
-                
-                with get_conn() as conn:
-                    conn.execute(
-                        "INSERT INTO line_users (uid, display_name, channel_id) VALUES (?, ?, ?) ON CONFLICT(uid, channel_id) DO NOTHING",
-                        (user_id, display_name, channel_id)
-                    )
-            except requests.RequestException as e:
-                logging.error(f"Could not fetch LINE profile for UID {user_id}: {e}")
+            registered_channel_id = None
+            
+            # Iterate through all channels to find which one this user is interacting with
+            for ch in all_channels:
+                access_token = ch["token"]
+                profile_url = f"https://api.line.me/v2/bot/profile/{user_id}"
+                headers = {"Authorization": f"Bearer {access_token}"}
+                try:
+                    res = requests.get(profile_url, headers=headers, timeout=3)
+                    if res.status_code == 200:
+                        profile = res.json()
+                        display_name = profile.get("displayName", "Unknown")
+                        registered_channel_id = ch["id"]
+                        
+                        with get_conn() as conn:
+                            conn.execute(
+                                "INSERT INTO line_users (uid, display_name, channel_id) VALUES (?, ?, ?) ON CONFLICT(uid, channel_id) DO NOTHING",
+                                (user_id, display_name, registered_channel_id)
+                            )
+                        logging.info(f"Successfully registered user {display_name} ({user_id}) for channel {registered_channel_id}.")
+                        break # Found the correct channel, no need to check others
+                except requests.RequestException:
+                    # This is expected to fail for channels the user hasn't interacted with
+                    continue
+            
+            if not registered_channel_id:
+                logging.error(f"Received a message from user {user_id}, but could not associate them with any known channel.")
 
         # Handle bot joining a group or room
         elif event.type == "join":
@@ -470,9 +460,8 @@ def line_webhook(payload: LineWebhook):
                         chat_name = summary.get("groupName", f"Group ({chat_id})")
                         joined_channel_id = ch["id"]
                         logging.info(f"Bot from channel ID {joined_channel_id} joined group '{chat_name}' ({chat_id}).")
-                        break # Found the correct channel
+                        break
                 except requests.RequestException:
-                    # This is expected to fail for channels not in the group
                     continue
             
             if joined_channel_id:
@@ -488,9 +477,6 @@ def line_webhook(payload: LineWebhook):
         elif event.type == "leave":
             chat_id = event.source.groupId if event.source.groupId else event.source.roomId
             if chat_id:
-                # Since the bot has left, we can't query the group summary.
-                # We have to assume the leave event applies to any channel that had this group_id.
-                # This is a limitation of the LINE API.
                 logging.info(f"Bot left chat: {chat_id}. Removing from all associated channels.")
                 with get_conn() as conn:
                     conn.execute("DELETE FROM line_groups WHERE group_id = ?", (chat_id,))
