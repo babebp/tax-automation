@@ -38,47 +38,92 @@ def add_channel_dialog():
 # ---------- LINE Notification Page Content ----------
 st.subheader("LINE Message Management")
 
+# --- Fetch channels for dropdown ---
+try:
+    channels_res = requests.get(f"{API_BASE}/line/channels")
+    channels_res.raise_for_status()
+    channels = channels_res.json()
+    channel_map = {ch['name']: ch['id'] for ch in channels}
+except Exception as e:
+    st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
+    channels = []
+    channel_map = {}
+
 # Create tabs
-tab1, tab2, tab3, tab4 = st.tabs(["Send Message", "Manage Recipients", "Registered Users", "Active Groups"])
+tab1, tab2 = st.tabs(["Send Message", "Channel Info"])
 
 # --- Tab 1: Send Message ---
 with tab1:
     st.markdown("### ส่งข้อความ")
 
-    # Fetch channels for dropdown
-    try:
-        channels_res = requests.get(f"{API_BASE}/line/channels")
-        channels_res.raise_for_status()
-        channels = channels_res.json()
-        channel_map = {ch['name']: ch['id'] for ch in channels}
-    except Exception as e:
-        st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
-        channels = []
-        channel_map = {}
-
     if not channels:
-        st.warning("ยังไม่มีการตั้งค่าช่องทางสำหรับส่งข้อความ กรุณาเพิ่มช่องทางก่อน")
+        st.warning("ยังไม่มีการตั้งค่าช่องทางสำหรับส่งข้อความ กรุณาเพิ่มช่องทางก่อนในแท็บ 'Channel Info'")
     else:
-        selected_channel_name = st.selectbox("เลือกช่องทางที่จะใช้ส่ง", options=list(channel_map.keys()))
+        selected_channel_name = st.selectbox("เลือกช่องทางที่จะใช้ส่ง", options=list(channel_map.keys()), key="send_msg_channel")
+        selected_channel_id = channel_map.get(selected_channel_name)
+
+        # Fetch registered users for the selected channel
+        try:
+            params = {"channel_id": selected_channel_id} if selected_channel_id else {}
+            all_users_res = requests.get(f"{API_BASE}/line/users", params=params)
+            all_users_res.raise_for_status()
+            all_users = all_users_res.json()
+            all_user_map = {u['display_name']: u['uid'] for u in all_users}
+        except Exception as e:
+            st.warning(f"ไม่สามารถโหลดรายชื่อผู้ใช้ทั้งหมดได้: {e}")
+            all_user_map = {}
+
+        # Fetch active groups for the selected channel
+        try:
+            params = {"channel_id": selected_channel_id} if selected_channel_id else {}
+            all_groups_res = requests.get(f"{API_BASE}/line/groups", params=params)
+            all_groups_res.raise_for_status()
+            all_groups = all_groups_res.json()
+            all_group_map = {g['group_name']: g['group_id'] for g in all_groups}
+        except Exception as e:
+            st.warning(f"ไม่สามารถโหลดรายชื่อกลุ่มทั้งหมดได้: {e}")
+            all_group_map = {}
+
+        selected_users = st.multiselect(
+            "เลือกผู้ใช้ที่จะส่งข้อความถึง (เลือกได้หลายคน)",
+            options=list(all_user_map.keys()),
+            placeholder="เลือกผู้ใช้..."
+        )
+        selected_groups = st.multiselect(
+            "เลือกกลุ่มที่จะส่งข้อความถึง (เลือกได้หลายกลุ่ม)",
+            options=list(all_group_map.keys()),
+            placeholder="เลือกกลุ่ม..."
+        )
         
         message_text = st.text_area("ข้อความที่จะส่ง:", height=150, placeholder="พิมพ์ข้อความที่นี่...")
         
         if st.button("🚀 ส่งข้อความ", type="primary"):
             if not message_text.strip():
                 st.error("กรุณาพิมพ์ข้อความที่จะส่ง")
-            elif not selected_channel_name:
+            elif not selected_channel_id:
                 st.error("กรุณาเลือกช่องทางที่จะใช้ส่ง")
+            elif not selected_users and not selected_groups:
+                st.error("กรุณาเลือกผู้ใช้หรือกลุ่มอย่างน้อยหนึ่งรายการ")
             else:
-                selected_channel_id = channel_map[selected_channel_name]
+                recipient_uids = [all_user_map.get(name) for name in selected_users]
+                recipient_gids = [all_group_map.get(name) for name in selected_groups]
+
+                # Filter out any potential None values if names somehow don't match
+                recipient_uids = [uid for uid in recipient_uids if uid]
+                recipient_gids = [gid for gid in recipient_gids if gid]
+
                 with st.spinner("กำลังส่งข้อความ..."):
                     try:
-                        send_res = requests.post(f"{API_BASE}/line/send_message", json={
+                        payload = {
                             "channel_id": selected_channel_id,
-                            "message": message_text.strip()
-                        })
+                            "message": message_text.strip(),
+                            "recipient_uids": recipient_uids,
+                            "recipient_gids": recipient_gids
+                        }
+                        send_res = requests.post(f"{API_BASE}/line/send_message", json=payload)
                         send_res.raise_for_status()
                         sent_count = send_res.json().get("sent_count", 0)
-                        st.success(f"ส่งข้อความสำเร็จ ({sent_count} คน)")
+                        st.success(f"ส่งข้อความสำเร็จ ({sent_count} получатели)")
                         st.balloons()
                     except requests.HTTPError as e:
                         detail = e.response.json().get("detail", str(e))
@@ -86,198 +131,82 @@ with tab1:
                     except Exception as e:
                         st.error(f"เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
 
-# --- Tab 2: Manage Recipients ---
+# --- Tab 2: Channel Info ---
 with tab2:
-    st.markdown("### จัดการบัญชีผู้ส่ง (LINE Channels)")
+    st.markdown("### Channel Info")
+    
+    with st.expander("Manage Sender Accounts (LINE Channels)"):
+        # Display channels with delete buttons
+        if channels:
+            for ch in channels:
+                c1, c2, c3 = st.columns([2, 4, 1])
+                c1.text(ch['name'])
+                c2.text(censor_token(ch['token']))
+                if c3.button("🗑️ Delete", key=f"del_channel_{ch['id']}"):
+                    try:
+                        del_res = requests.delete(f"{API_BASE}/line/channels/{ch['id']}")
+                        del_res.raise_for_status()
+                        st.toast("Channel deleted successfully", icon="✅")
+                        st.rerun()
+                    except requests.HTTPError as e:
+                        detail = e.response.json().get("detail", str(e))
+                        st.error(f"Failed to delete: {detail}")
+        else:
+            st.info("No channels have been set up for sending messages yet")
+
+    st.divider()
+
     if st.button("➕ Add Line Channel"):
         add_channel_dialog()
 
-    # Fetch current channels
-    try:
-        channels_res = requests.get(f"{API_BASE}/line/channels")
-        channels_res.raise_for_status()
-        channels = channels_res.json()
-    except Exception as e:
-        st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
-        channels = []
-
-    # Display channels with delete buttons
+    # Channel selector for filtering users and groups
     if channels:
-        for ch in channels:
-            c1, c2, c3 = st.columns([2, 4, 1])
-            c1.text(ch['name'])
-            c2.text(censor_token(ch['token']))
-            if c3.button("🗑️ ลบ", key=f"del_channel_{ch['id']}"):
-                try:
-                    del_res = requests.delete(f"{API_BASE}/line/channels/{ch['id']}")
-                    del_res.raise_for_status()
-                    st.toast("ลบช่องทางสำเร็จ", icon="✅")
-                    st.rerun()
-                except requests.HTTPError as e:
-                    detail = e.response.json().get("detail", str(e))
-                    st.error(f"ลบไม่สำเร็จ: {detail}")
-    
-    st.divider()
+        channel_names = ["All Channels"] + [ch['name'] for ch in channels]
+        selected_channel_name = st.selectbox("Select a channel to view information", options=channel_names)
 
-    st.markdown("### จัดการรายชื่อผู้รับ")
-    
-    # Fetch channels to check if any exist, which is needed to resolve UIDs to display names
-    try:
-        channels_res = requests.get(f"{API_BASE}/line/channels")
-        channels_res.raise_for_status()
-        channels = channels_res.json()
-    except Exception as e:
-        st.error(f"ไม่สามารถโหลดรายชื่อช่องทางได้: {e}")
-        channels = []
-
-    if not channels:
-        st.warning("กรุณาเพิ่มช่องทางผู้ส่งอย่างน้อย 1 ช่องทาง เพื่อใช้ในการดึงข้อมูลโปรไฟล์ผู้รับ")
+        selected_channel_id = None
+        if selected_channel_name != "All Channels":
+            selected_channel_id = next((ch['id'] for ch in channels if ch['name'] == selected_channel_name), None)
     else:
-        # --- Add New Recipients ---
-        st.markdown("**เพิ่มผู้รับใหม่**")
-        
-        # Add from list of registered users
-        st.markdown("เพิ่มจากผู้ใช้ที่ลงทะเบียน")
+        selected_channel_id = None
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### All users registered via LINE")
+        st.markdown("_A list of all users who have ever sent a message to the bot_")
         try:
-            users_res = requests.get(f"{API_BASE}/line/users")
+            params = {"channel_id": selected_channel_id} if selected_channel_id else {}
+            users_res = requests.get(f"{API_BASE}/line/users", params=params)
             users_res.raise_for_status()
             users = users_res.json()
-            user_map = {u['display_name']: u['uid'] for u in users}
+            if users:
+                user_data = {"User ID": [u["uid"] for u in users], "Display Name": [u["display_name"] for u in users]}
+                st.dataframe(user_data, use_container_width=True)
+            else:
+                st.info("No users have registered via LINE yet")
+        except requests.HTTPError as e:
+            detail = e.response.json().get("detail", str(e))
+            st.error(f"Could not load user list: {detail}")
         except Exception as e:
-            st.error(f"ไม่สามารถโหลดรายชื่อผู้ใช้ได้: {e}")
-            users = []
-            user_map = {}
+            st.error(f"An unexpected error occurred: {e}")
 
-        if not users:
-            st.warning("ยังไม่มีผู้ใช้ที่ลงทะเบียน (ผู้ใช้ต้องเคยส่งข้อความหาบอทก่อน)")
-        else:
-            with st.form("add_user_form"):
-                selected_user_name = st.selectbox(
-                    "เลือกผู้ใช้ที่จะเพิ่ม",
-                    options=list(user_map.keys())
-                )
-                submitted_user = st.form_submit_button("➕ เพิ่มผู้ใช้")
-                if submitted_user and selected_user_name:
-                    user_id_to_add = user_map[selected_user_name]
-                    try:
-                        add_res = requests.post(f"{API_BASE}/line/recipients", json={"uid": user_id_to_add})
-                        add_res.raise_for_status()
-                        st.toast(f"เพิ่มผู้ใช้ '{selected_user_name}' สำเร็จ", icon="✅")
-                        st.rerun()
-                    except requests.HTTPError as e:
-                        detail = e.response.json().get("detail", str(e))
-                        st.error(f"เพิ่มไม่สำเร็จ: {detail}")
-
-        # Add from list of Groups
-        st.markdown("เพิ่มจากกลุ่มที่บอทเป็นสมาชิก")
+    with col2:
+        st.markdown("### Groups the bot is a member of")
+        st.markdown("_A list of all groups the bot is currently a member of_")
         try:
-            groups_res = requests.get(f"{API_BASE}/line/groups")
+            params = {"channel_id": selected_channel_id} if selected_channel_id else {}
+            groups_res = requests.get(f"{API_BASE}/line/groups", params=params)
             groups_res.raise_for_status()
             groups = groups_res.json()
-            group_map = {g['group_name']: g['group_id'] for g in groups}
+            if groups:
+                group_data = {"Group ID": [g["group_id"] for g in groups], "Group Name": [g["group_name"] for g in groups]}
+                st.dataframe(group_data, use_container_width=True)
+            else:
+                st.info("The bot is not in any groups")
+        except requests.HTTPError as e:
+            detail = e.response.json().get("detail", str(e))
+            st.error(f"Could not load group list: {detail}")
         except Exception as e:
-            st.error(f"ไม่สามารถโหลดรายชื่อกลุ่มได้: {e}")
-            groups = []
-            group_map = {}
-
-        if not groups:
-            st.warning("บอทไม่ได้อยู่ในกลุ่มใดๆ")
-        else:
-            with st.form("add_group_form"):
-                selected_group_name = st.selectbox(
-                    "เลือกกลุ่มที่จะเพิ่ม", 
-                    options=list(group_map.keys())
-                )
-                submitted_group = st.form_submit_button("➕ เพิ่มกลุ่ม")
-                if submitted_group and selected_group_name:
-                    group_id_to_add = group_map[selected_group_name]
-                    try:
-                        add_res = requests.post(f"{API_BASE}/line/recipients", json={"uid": group_id_to_add})
-                        add_res.raise_for_status()
-                        st.toast(f"เพิ่มกลุ่ม '{selected_group_name}' สำเร็จ", icon="✅")
-                        st.rerun()
-                    except requests.HTTPError as e:
-                        detail = e.response.json().get("detail", str(e))
-                        st.error(f"เพิ่มไม่สำเร็จ: {detail}")
-        
-        st.divider()
-
-        st.markdown("**รายชื่อผู้รับปัจจุบัน**")
-        # Fetch global recipient details
-        try:
-            recipients_res = requests.get(f"{API_BASE}/line/recipients/details")
-            recipients_res.raise_for_status()
-            recipients = recipients_res.json()
-        except Exception as e:
-            st.error(f"ไม่สามารถโหลดรายชื่อผู้รับได้: {e}")
-            recipients = []
-
-        # Display recipients with delete buttons
-        if recipients:
-            for r in recipients:
-                r_col1, r_col2 = st.columns([4, 1])
-                r_col1.text(f"{r['displayName']} ({r['uid']})")
-                if r_col2.button("🗑️ ลบ", key=f"del_recipient_{r['id']}"):
-                    try:
-                        del_res = requests.delete(f"{API_BASE}/line/recipients/{r['id']}")
-                        del_res.raise_for_status()
-                        st.toast("ลบผู้รับสำเร็จ", icon="✅")
-                        st.rerun()
-                    except requests.HTTPError as e:
-                        detail = e.response.json().get("detail", str(e))
-                        st.error(f"ลบไม่สำเร็จ: {detail}")
-        else:
-            st.info("ยังไม่มีผู้รับในระบบ")
-
-# --- Tab 3: Registered Users ---
-with tab3:
-    st.markdown("### ผู้ใช้ทั้งหมดที่ลงทะเบียนผ่าน LINE")
-    st.markdown("รายชื่อผู้ใช้ทั้งหมดที่เคยส่งข้อความหาบอท")
-
-    try:
-        users_res = requests.get(f"{API_BASE}/line/users")
-        users_res.raise_for_status()
-        users = users_res.json()
-        
-        if users:
-            # Prepare data for display
-            user_data = {
-                "User ID": [u["uid"] for u in users],
-                "Display Name": [u["display_name"] for u in users]
-            }
-            st.dataframe(user_data, use_container_width=True)
-        else:
-            st.info("ยังไม่มีผู้ใช้ที่ลงทะเบียนผ่าน LINE")
-
-    except requests.HTTPError as e:
-        detail = e.response.json().get("detail", str(e))
-        st.error(f"ไม่สามารถโหลดรายชื่อผู้ใช้ได้: {detail}")
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
-
-# --- Tab 4: Active Groups ---
-with tab4:
-    st.markdown("### กลุ่มที่บอทเป็นสมาชิกอยู่")
-    st.markdown("รายชื่อกลุ่มทั้งหมดที่บอทเป็นสมาชิกอยู่ ณ ปัจจุบัน")
-
-    try:
-        groups_res = requests.get(f"{API_BASE}/line/groups")
-        groups_res.raise_for_status()
-        groups = groups_res.json()
-        
-        if groups:
-            # Prepare data for display
-            group_data = {
-                "Group ID": [g["group_id"] for g in groups],
-                "Group Name": [g["group_name"] for g in groups]
-            }
-            st.dataframe(group_data, use_container_width=True)
-        else:
-            st.info("บอทไม่ได้อยู่ในกลุ่มใดๆ")
-
-    except requests.HTTPError as e:
-        detail = e.response.json().get("detail", str(e))
-        st.error(f"ไม่สามารถโหลดรายชื่อกลุ่มได้: {detail}")
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดที่ไม่คาดคิด: {e}")
+            st.error(f"An unexpected error occurred: {e}")
 

@@ -127,16 +127,21 @@ with tab1:
                 
                 folder_options = {f["name"]: f["id"] for f in drive_folders}
                 
+                # Add a search box to filter folders
+                search_term = st.text_input("Search for a folder:", "")
+                
+                filtered_folder_names = [name for name in folder_options.keys() if search_term.lower() in name.lower()]
+
                 current_folder_name = selected_company.get("google_drive_folder_name")
-                folder_names = list(folder_options.keys())
+                
                 try:
-                    current_index = folder_names.index(current_folder_name) if current_folder_name in folder_names else 0
+                    current_index = filtered_folder_names.index(current_folder_name) if current_folder_name in filtered_folder_names else 0
                 except ValueError:
                     current_index = 0
 
                 selected_folder_name = st.selectbox(
-                    "เลือก Folder จาก Google Drive", 
-                    options=folder_names,
+                    "Select a folder from Google Drive", 
+                    options=filtered_folder_names,
                     index=current_index
                 )
 
@@ -197,10 +202,9 @@ with tab1:
 
             if banks:
                 for b in banks:
-                    c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
-                    c1.write(b["bank_name"])
-                    c2.write(b["tb_code"])
-                    c3.write(f'Company ID: {b["company_id"]}')
+                    c2, c3, c4 = st.columns([3, 2, 1])
+                    c2.write(b["bank_name"])
+                    c3.write(b["tb_code"])
                     if c4.button("🗑️ ลบ", key=f"del_bank_{b['id']}"):
                         try:
                             rr = requests.delete(f"{API_BASE}/banks/{b['id']}")

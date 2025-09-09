@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 import openpyxl
 from dotenv import load_dotenv
 import os
+import re
 import pandas as pd
 import requests
 from datetime import datetime
@@ -82,6 +83,7 @@ def init_db():
             company_id INTEGER NOT NULL,
             bank_name TEXT NOT NULL,
             tb_code TEXT NOT NULL,
+            UNIQUE(company_id, bank_name),
             FOREIGN KEY(company_id) REFERENCES companies(id) ON DELETE CASCADE
         )
         """)
@@ -96,18 +98,17 @@ def init_db():
             FOREIGN KEY(company_id) REFERENCES companies(id) ON DELETE CASCADE
         )
         """)
-        # line_recipients table
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS line_recipients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid TEXT NOT NULL UNIQUE
-        )
-        """)
+        # Drop the old line_recipients table if it exists for a clean slate
+        cur.execute("DROP TABLE IF EXISTS line_recipients")
+        
         cur.execute("""
         CREATE TABLE IF NOT EXISTS line_users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid TEXT UNIQUE NOT NULL,
-            display_name TEXT NOT NULL
+            uid TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            channel_id INTEGER NOT NULL,
+            UNIQUE(uid, channel_id),
+            FOREIGN KEY(channel_id) REFERENCES line_channels(id) ON DELETE CASCADE
         )
         """)
         # line_channels table
@@ -115,15 +116,19 @@ def init_db():
         CREATE TABLE IF NOT EXISTS line_channels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE NOT NULL,
-            token TEXT NOT NULL
+            token TEXT NOT NULL,
+            channel_id_line TEXT
         )
         """)
         # line_groups table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS line_groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            group_id TEXT UNIQUE NOT NULL,
-            group_name TEXT
+            group_id TEXT NOT NULL,
+            group_name TEXT,
+            channel_id INTEGER NOT NULL,
+            UNIQUE(group_id, channel_id),
+            FOREIGN KEY(channel_id) REFERENCES line_channels(id) ON DELETE CASCADE
         )
         """)
 
@@ -139,9 +144,11 @@ class LineEventSource(BaseModel):
 class LineEvent(BaseModel):
     type: str
     source: LineEventSource
+    destination: Optional[str] = None
 
 class LineWebhook(BaseModel):
     events: List[LineEvent]
+    destination: Optional[str] = None # For top-level destination
 
 class Company(BaseModel):
     id: int
@@ -173,18 +180,6 @@ class ReconcileStart(BaseModel):
     year: int
     parts: List[str]
 
-class LineRecipientCreate(BaseModel):
-    uid: str = Field(..., min_length=1)
-
-class LineRecipient(BaseModel):
-    id: int
-    uid: str
-
-class LineRecipientDetail(BaseModel):
-    id: int
-    uid: str
-    displayName: str
-
 class LineChannelCreate(BaseModel):
     name: str = Field(..., min_length=1)
     token: str = Field(..., min_length=1)
@@ -194,19 +189,23 @@ class LineChannel(BaseModel):
     name: str
     token: str
 
-class LineMessage(BaseModel):
+class LineMessageSend(BaseModel):
     channel_id: int
     message: str = Field(..., min_length=1)
+    recipient_uids: List[str] = []
+    recipient_gids: List[str] = []
 
 class LineUser(BaseModel):
     id: int
     uid: str
     display_name: str
+    channel_id: int
 
 class LineGroup(BaseModel):
     id: int
     group_id: str
     group_name: str
+    channel_id: int
 
 # ---------- New Helper Functions for PDF and LLM ----------
 def get_amount_from_gemini(file_content: bytes, prompt: str) -> str:
@@ -217,12 +216,25 @@ def get_amount_from_gemini(file_content: bytes, prompt: str) -> str:
         return "No file content"
 
     try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        model = genai.GenerativeModel('gemini-pro')
         response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": file_content}])
         return response.text.strip()
     except Exception as e:
         logging.error(f"Gemini API call failed: {e}")
         return f"Error: {e}"
+
+def clean_and_convert_to_float(text: str) -> Optional[float]:
+    """Cleans a string to remove non-numeric characters and converts it to a float."""
+    if not isinstance(text, str):
+        return None
+    try:
+        # Remove commas, currency symbols, and any non-numeric characters except for the decimal point and minus sign.
+        cleaned_text = re.sub(r'[^\d.-]', '', text)
+        if cleaned_text:
+            return float(cleaned_text)
+    except (ValueError, TypeError):
+        return None
+    return None
 
 # ---------- Constants ----------
 FIXED_FORMS = ["PND1", "PND3", "PND53", "PP30", "SSO", "Revenue", "Credit Note"]
@@ -333,12 +345,16 @@ def list_banks(company_id: int):
 
 @app.post("/banks", response_model=Bank)
 def add_bank(payload: BankCreate):
-    """Adds a new bank to a company."""
+    """Adds a new bank to a company and assigns it the next available index."""
     with get_conn() as conn:
         c = conn.execute("SELECT id FROM companies WHERE id = ?", (payload.company_id,)).fetchone()
         if not c:
             raise HTTPException(status_code=404, detail="Company not found.")
-        cur = conn.execute("INSERT INTO company_banks(company_id, bank_name, tb_code) VALUES (?, ?, ?)", (payload.company_id, payload.bank_name.strip(), payload.tb_code.strip()))
+        
+        cur = conn.execute(
+            "INSERT INTO company_banks(company_id, bank_name, tb_code) VALUES (?, ?, ?)",
+            (payload.company_id, payload.bank_name.strip(), payload.tb_code.strip())
+        )
         bid = cur.lastrowid
         row = conn.execute("SELECT id, company_id, bank_name, tb_code FROM company_banks WHERE id = ?", (bid,)).fetchone()
         return Bank(id=row["id"], company_id=row["company_id"], bank_name=row["bank_name"], tb_code=row["tb_code"])
@@ -385,24 +401,31 @@ def upsert_company_forms(company_id: int, payload: FormsUpsert):
 @app.post("/line/webhook")
 def line_webhook(payload: LineWebhook):
     """Handles incoming LINE messages to capture user information."""
-    # Fetch all channel tokens to try them for API calls.
+    destination = payload.destination
+    if not destination:
+        logging.error("Received a webhook event without a destination.")
+        return {"ok": False, "detail": "Missing destination"}
+
     with get_conn() as conn:
-        channel_rows = conn.execute("SELECT token FROM line_channels ORDER BY id").fetchall()
-        if not channel_rows:
-            logging.error("LINE webhook called, but no channels are configured in the database.")
-            return {"ok": True, "detail": "No channels configured."}
-        access_tokens = [row["token"] for row in channel_rows]
+        # Find the channel_id based on the destination from the webhook event
+        channel_row = conn.execute("SELECT id, token FROM line_channels WHERE channel_id_line = ?", (destination,)).fetchone()
+        if not channel_row:
+            logging.error(f"Webhook event for an unknown destination: {destination}")
+            # Store the destination in the line_channels table if it's a new channel
+            conn.execute("UPDATE line_channels SET channel_id_line = ? WHERE id = (SELECT id FROM line_channels ORDER BY id DESC LIMIT 1)", (destination,))
+            channel_row = conn.execute("SELECT id, token FROM line_channels WHERE channel_id_line = ?", (destination,)).fetchone()
+            if not channel_row:
+                return {"ok": False, "detail": "Unconfigured channel"}
+        
+        channel_id = channel_row["id"]
+        access_token = channel_row["token"]
 
     for event in payload.events:
-        # For events that require an API call back to LINE, we might need to try multiple tokens.
-        # The first token is used for user profiles as a default.
-        default_token = access_tokens[0]
-
         # Handle user messages (direct 1-on-1 chat)
         if event.type == "message" and event.source.userId:
             user_id = event.source.userId
             profile_url = f"https://api.line.me/v2/bot/profile/{user_id}"
-            headers = {"Authorization": f"Bearer {default_token}"}
+            headers = {"Authorization": f"Bearer {access_token}"}
             try:
                 res = requests.get(profile_url, headers=headers, timeout=5)
                 res.raise_for_status()
@@ -411,150 +434,71 @@ def line_webhook(payload: LineWebhook):
                 
                 with get_conn() as conn:
                     conn.execute(
-                        "INSERT OR IGNORE INTO line_users (uid, display_name) VALUES (?, ?)",
-                        (user_id, display_name)
+                        "INSERT INTO line_users (uid, display_name, channel_id) VALUES (?, ?, ?) ON CONFLICT(uid, channel_id) DO NOTHING",
+                        (user_id, display_name, channel_id)
                     )
             except requests.RequestException as e:
-                logging.error(f"Could not fetch LINE profile for UID {user_id} with default token: {e}")
+                logging.error(f"Could not fetch LINE profile for UID {user_id}: {e}")
 
         # Handle bot joining a group or room
         elif event.type == "join":
             chat_id = event.source.groupId if event.source.groupId else event.source.roomId
             if not chat_id:
-                return {"ok": True}
+                continue
 
             chat_name = f"Unknown Chat ({chat_id})"
             
-            # Check if it's a group (ID starts with 'C')
             if chat_id.startswith('C'):
                 summary_url = f"https://api.line.me/v2/bot/group/{chat_id}/summary"
-                
-                # Iterate through all tokens to find one that can access the group summary
-                for token in access_tokens:
-                    headers = {"Authorization": f"Bearer {token}"}
-                    try:
-                        res = requests.get(summary_url, headers=headers, timeout=5)
-                        if res.status_code == 200:
-                            summary = res.json()
-                            chat_name = summary.get("groupName", f"Group ({chat_id})")
-                            logging.info(f"Successfully fetched group name for {chat_id} using a token.")
-                            break # Success, exit the loop
-                        else:
-                            # Log non-200 responses that aren't fatal, but move to the next token
-                            logging.warning(f"Attempt to fetch group summary for {chat_id} with a token failed with status {res.status_code}.")
-                    except requests.RequestException as e:
-                        logging.error(f"A network error occurred while trying a token for GID {chat_id}: {e}")
-                else: # This 'else' belongs to the 'for' loop
-                    logging.error(f"Failed to fetch group summary for {chat_id} with any of the available tokens.")
+                headers = {"Authorization": f"Bearer {access_token}"}
+                try:
+                    res = requests.get(summary_url, headers=headers, timeout=5)
+                    if res.status_code == 200:
+                        summary = res.json()
+                        chat_name = summary.get("groupName", f"Group ({chat_id})")
+                except requests.RequestException as e:
+                    logging.error(f"Could not fetch group summary for GID {chat_id}: {e}")
 
-            # Check if it's a room (ID starts with 'R')
             elif chat_id.startswith('R'):
                 chat_name = f"Room ({chat_id})"
 
-            logging.info(f"Bot joined chat: {chat_name} ({chat_id})")
+            logging.info(f"Bot joined chat: {chat_name} ({chat_id}) for channel {channel_id}")
             with get_conn() as conn:
                 conn.execute(
-                    "INSERT INTO line_groups (group_id, group_name) VALUES (?, ?) ON CONFLICT(group_id) DO UPDATE SET group_name=excluded.group_name",
-                    (chat_id, chat_name)
+                    "INSERT INTO line_groups (group_id, group_name, channel_id) VALUES (?, ?, ?) ON CONFLICT(group_id, channel_id) DO UPDATE SET group_name=excluded.group_name",
+                    (chat_id, chat_name, channel_id)
                 )
 
         # Handle bot leaving a group or room
         elif event.type == "leave":
             chat_id = event.source.groupId if event.source.groupId else event.source.roomId
             if chat_id:
-                logging.info(f"Bot left chat: {chat_id}")
+                logging.info(f"Bot left chat: {chat_id} for channel {channel_id}")
                 with get_conn() as conn:
-                    conn.execute("DELETE FROM line_groups WHERE group_id = ?", (chat_id,))
+                    conn.execute("DELETE FROM line_groups WHERE group_id = ? AND channel_id = ?", (chat_id, channel_id))
 
     return {"ok": True}
 
-@app.post("/line/recipients", response_model=LineRecipient)
-def add_line_recipient(payload: LineRecipientCreate):
-    """Adds a new global LINE recipient."""
-    with get_conn() as conn:
-        try:
-            cur = conn.execute("INSERT INTO line_recipients(uid) VALUES (?)", (payload.uid.strip(),))
-            rid = cur.lastrowid
-        except sqlite3.IntegrityError:
-            raise HTTPException(status_code=400, detail="Recipient UID already exists.")
-        
-        row = conn.execute("SELECT id, uid FROM line_recipients WHERE id = ?", (rid,)).fetchone()
-        return LineRecipient(id=row["id"], uid=row["uid"])
-
-@app.delete("/line/recipients/{recipient_id}")
-def delete_line_recipient(recipient_id: int):
-    """Deletes a LINE recipient."""
-    with get_conn() as conn:
-        row = conn.execute("SELECT id FROM line_recipients WHERE id = ?", (recipient_id,)).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Recipient not found.")
-        conn.execute("DELETE FROM line_recipients WHERE id = ?", (recipient_id,))
-        return {"ok": True}
-
-@app.get("/line/recipients/details", response_model=List[LineRecipientDetail])
-def get_recipient_details():
-    """Gets details for all global recipients (users and groups)."""
-    access_token = None
-    with get_conn() as conn:
-        # Use the token from the first available channel to resolve names
-        first_channel = conn.execute("SELECT token FROM line_channels LIMIT 1").fetchone()
-        if first_channel:
-            access_token = first_channel["token"]
-        
-        recipient_rows = conn.execute("SELECT id, uid FROM line_recipients").fetchall()
-
-    if not access_token:
-        # If there's no channel, we can't resolve names, but we can still return UIDs
-        return [LineRecipientDetail(id=r["id"], uid=r["uid"], displayName=f"({r['uid']})") for r in recipient_rows]
-
-    headers = {"Authorization": f"Bearer {access_token}"}
-    detailed_recipients = []
-
-    for r in recipient_rows:
-        uid = r["uid"]
-        display_name = f"({uid})" # Default display name
-
-        # If it's a user ID
-        if uid.startswith('U'):
-            profile_url = f"https://api.line.me/v2/bot/profile/{uid}"
-            try:
-                res = requests.get(profile_url, headers=headers, timeout=5)
-                res.raise_for_status()
-                display_name = res.json().get("displayName", "(Name not available)")
-            except requests.RequestException as e:
-                logging.warning(f"Could not fetch profile for UID {uid}: {e}")
-                display_name = "(Profile not found)"
-        
-        # If it's a group ID
-        elif uid.startswith('C') or uid.startswith('R'):
-            with get_conn() as conn:
-                group_row = conn.execute("SELECT group_name FROM line_groups WHERE group_id = ?", (uid,)).fetchone()
-                if group_row and group_row["group_name"]:
-                    display_name = group_row["group_name"]
-                else:
-                    display_name = f"Group/Room ({uid})"
-
-        detailed_recipients.append(
-            LineRecipientDetail(id=r["id"], uid=uid, displayName=display_name)
-        )
-    
-    return detailed_recipients
-
-
 @app.get("/line/users", response_model=List[LineUser])
-def list_line_users():
+def list_line_users(channel_id: Optional[int] = None):
     """Lists all unique LINE users who have interacted with the bot."""
     with get_conn() as conn:
-        rows = conn.execute("SELECT id, uid, display_name FROM line_users ORDER BY display_name").fetchall()
-        return [LineUser(id=r["id"], uid=r["uid"], display_name=r["display_name"]) for r in rows]
+        if channel_id:
+            rows = conn.execute("SELECT id, uid, display_name, channel_id FROM line_users WHERE channel_id = ? ORDER BY display_name", (channel_id,)).fetchall()
+        else:
+            rows = conn.execute("SELECT id, uid, display_name, channel_id FROM line_users ORDER BY display_name").fetchall()
+        return [LineUser(id=r["id"], uid=r["uid"], display_name=r["display_name"], channel_id=r["channel_id"]) for r in rows]
 
 
 @app.get("/line/groups", response_model=List[LineGroup])
-def list_line_groups():
+def list_line_groups(channel_id: Optional[int] = None):
     """Lists all groups the LINE bot is currently a member of."""
     with get_conn() as conn:
-        rows = conn.execute("SELECT id, group_id, group_name FROM line_groups ORDER BY group_name").fetchall()
-        return [LineGroup(id=r["id"], group_id=r["group_id"], group_name=r["group_name"]) for r in rows]
+        if channel_id:
+            rows = conn.execute("SELECT id, group_id, group_name, channel_id FROM line_groups WHERE channel_id = ? ORDER BY group_name", (channel_id,)).fetchall()
+        else:
+            rows = conn.execute("SELECT id, group_id, group_name, channel_id FROM line_groups ORDER BY group_name").fetchall()
+        return [LineGroup(id=r["id"], group_id=r["group_id"], group_name=r["group_name"], channel_id=r["channel_id"]) for r in rows]
 
 
 # ---------- LINE Channel endpoints ----------
@@ -589,8 +533,8 @@ def delete_line_channel(channel_id: int):
 
 
 @app.post("/line/send_message")
-def send_line_message(payload: LineMessage):
-    """Sends a message to all registered LINE recipients using a specific channel."""
+def send_line_message(payload: LineMessageSend):
+    """Sends a message to specified LINE recipients using a specific channel."""
     with get_conn() as conn:
         # Get the channel's access token
         channel_row = conn.execute("SELECT token FROM line_channels WHERE id = ?", (payload.channel_id,)).fetchone()
@@ -598,12 +542,10 @@ def send_line_message(payload: LineMessage):
             raise HTTPException(status_code=404, detail="LINE channel not found.")
         access_token = channel_row["token"]
 
-        # Get all global recipient UIDs
-        rows = conn.execute("SELECT uid FROM line_recipients").fetchall()
-        uids = [r["uid"] for r in rows]
+    uids_to_send = payload.recipient_uids + payload.recipient_gids
 
-    if not uids:
-        raise HTTPException(status_code=400, detail="No recipients configured.")
+    if not uids_to_send:
+        raise HTTPException(status_code=400, detail="No recipients selected.")
 
     headers = {
         "Content-Type": "application/json",
@@ -613,7 +555,7 @@ def send_line_message(payload: LineMessage):
     error_details = []
     success_count = 0
 
-    for uid in uids:
+    for uid in uids_to_send:
         body = {
             "to": uid,
             "messages": [{"type": "text", "text": payload.message}]
@@ -629,7 +571,7 @@ def send_line_message(payload: LineMessage):
     if error_details:
         raise HTTPException(
             status_code=500, 
-            detail=f"Sent {success_count}/{len(uids)} messages. Errors: {', '.join(error_details)}"
+            detail=f"Sent {success_count}/{len(uids_to_send)} messages. Errors: {', '.join(error_details)}"
         )
 
     return {"ok": True, "sent_count": success_count}
@@ -708,13 +650,17 @@ def start_workflow(payload: WorkflowStart):
     pnd_folders = gd.find_files(drive_service, pnd_folders_query)
 
     # Find files within the bank folder
-    bank_files = []
+    bank_files_map = {}
     if bank_folders:
         bank_folder_id = bank_folders[0]['id']
         logging.info(f"Bank folder found with id: {bank_folder_id}, searching for files.")
-        bank_files_query = f"'{bank_folder_id}' in parents and name contains '{payload.year}{payload.month}' and mimeType = 'application/pdf'"
-        bank_files = gd.find_files(drive_service, bank_files_query)
-    logging.info(f"Found {len(bank_files)} bank files.")
+        for bank in banks:
+            bank_name = bank['bank_name']
+            search_term = bank_name
+            bank_files_query = f"'{bank_folder_id}' in parents and name contains '{payload.year}{payload.month}' and name contains '{search_term}' and mimeType = 'application/pdf'"
+            found_files = gd.find_files(drive_service, bank_files_query)
+            bank_files_map[bank_name] = found_files
+            logging.info(f"For {search_term}, found {len(found_files)} files.")
 
     # Find files within the PP30 folder
     pp30_files = []
@@ -840,12 +786,13 @@ def start_workflow(payload: WorkflowStart):
     for bank in banks:
         bank_name = bank['bank_name']
         tb_code = bank['tb_code']
-        found_files = [f for f in bank_files if bank_name.lower() in f['name'].lower()]
+        found_files = bank_files_map.get(bank_name, [])
         file_names = ", ".join([f['name'] for f in found_files])
         
         amount = "N/A"
         if found_files:
-            amounts = []
+            total_amount = 0.0
+            file_count = 0
             for f in found_files:
                 request = drive_service.files().get_media(fileId=f['id'])
                 fh = BytesIO()
@@ -854,9 +801,13 @@ def start_workflow(payload: WorkflowStart):
                 while not done:
                     status, done = downloader.next_chunk()
                 fh.seek(0)
-                amount_from_pdf = get_amount_from_gemini(fh.getvalue(), PROMPTS["BANK"])
-                amounts.append(amount_from_pdf)
-            amount = ", ".join(amounts)
+                amount_str = get_amount_from_gemini(fh.getvalue(), PROMPTS["BANK"])
+                amount_float = clean_and_convert_to_float(amount_str)
+                if amount_float is not None:
+                    total_amount += amount_float
+                    file_count += 1
+            # If multiple files are found, we sum them up.
+            amount = total_amount if file_count > 0 else "N/A"
             
         tb_amount = tb_data.get(str(tb_code), "Not Found")
         sheet.append([bank_name, tb_code, file_names, amount, tb_amount, "N/A"])
@@ -887,7 +838,8 @@ def start_workflow(payload: WorkflowStart):
         file_names = ", ".join([f['name'] for f in files])
         amount = "N/A"
         if files and prompt:
-            amounts = []
+            total_amount = 0.0
+            file_count = 0
             for f in files:
                 request = drive_service.files().get_media(fileId=f['id'])
                 fh = BytesIO()
@@ -896,9 +848,12 @@ def start_workflow(payload: WorkflowStart):
                 while not done:
                     status, done = downloader.next_chunk()
                 fh.seek(0)
-                amount_from_pdf = get_amount_from_gemini(fh.getvalue(), prompt)
-                amounts.append(amount_from_pdf)
-            amount = ", ".join(amounts)
+                amount_str = get_amount_from_gemini(fh.getvalue(), prompt)
+                amount_float = clean_and_convert_to_float(amount_str)
+                if amount_float is not None:
+                    total_amount += amount_float
+                    file_count += 1
+            amount = total_amount if file_count > 0 else "N/A"
 
         tb_amount = tb_data.get(str(tb_code), "Not Found")
         excel_actual_amount = vat_amounts.get(form_name, "N/A")
@@ -1085,9 +1040,9 @@ def start_reconcile(payload: ReconcileStart):
             gl_sheet = gl_wb.active
 
             if "gl_subsheet" in payload.parts:
-                gl_ws = wb.create_sheet(title="GL")
-                for row in gl_sheet.iter_rows(values_only=True):
-                    gl_ws.append(row)
+                # Efficiently copy the entire GL sheet instead of looping
+                gl_ws = wb.copy_worksheet(gl_sheet)
+                gl_ws.title = "GL"
 
             # --- OPTIMIZED SINGLE LOOP ---
             if any(part in payload.parts for part in ["tb_code_subsheets", "pp30_subsheet"]):
@@ -1271,12 +1226,12 @@ def start_reconcile(payload: ReconcileStart):
                         
                         prompt = "จากเอกสารนี้ ให้ดึงตัวเลขของหัวข้อ 'ยอดขายที่ต้องเสียภาษี' ออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด"
                         amount_str = get_amount_from_gemini(fh.getvalue(), prompt)
-                        try:
-                            amount = float(amount_str.replace(",", ""))
-                        except (ValueError, TypeError):
+                        amount = clean_and_convert_to_float(amount_str)
+                        if amount is None:
                             logging.warning(f"Could not convert '{amount_str}' to a number for PP30 month {month_str}.")
-                            amount = amount_str
-                        pp30_ws[f'D{i+5}'] = amount
+                            amount = amount_str # Keep original string if conversion fails
+                        
+                        pp30_ws[f'D{i+5}'] = amount if amount is not None else "-"
                     else:
                         pp30_ws[f'D{i+5}'] = "-"
             else:
