@@ -401,28 +401,37 @@ def upsert_company_forms(company_id: int, payload: FormsUpsert):
 @app.post("/line/webhook")
 def line_webhook(payload: LineWebhook):
     """Handles incoming LINE messages to capture user information."""
+    # For message events, we can identify the channel directly.
+    # For join/leave events, we need to deduce the channel.
     destination = payload.destination
-    if not destination:
-        logging.error("Received a webhook event without a destination.")
-        return {"ok": False, "detail": "Missing destination"}
 
     with get_conn() as conn:
-        # Find the channel_id based on the destination from the webhook event
-        channel_row = conn.execute("SELECT id, token FROM line_channels WHERE channel_id_line = ?", (destination,)).fetchone()
-        if not channel_row:
-            logging.error(f"Webhook event for an unknown destination: {destination}")
-            # Store the destination in the line_channels table if it's a new channel
-            conn.execute("UPDATE line_channels SET channel_id_line = ? WHERE id = (SELECT id FROM line_channels ORDER BY id DESC LIMIT 1)", (destination,))
-            channel_row = conn.execute("SELECT id, token FROM line_channels WHERE channel_id_line = ?", (destination,)).fetchone()
-            if not channel_row:
-                return {"ok": False, "detail": "Unconfigured channel"}
-        
-        channel_id = channel_row["id"]
-        access_token = channel_row["token"]
+        # Fetch all channels for join/leave event processing
+        all_channels = conn.execute("SELECT id, token, channel_id_line FROM line_channels").fetchall()
+        if not all_channels:
+            logging.error("Webhook called, but no channels are configured.")
+            return {"ok": False, "detail": "No channels configured"}
 
     for event in payload.events:
+        channel_id = None
+        access_token = None
+
+        # 1. Identify the channel for the event
+        if event.type == "message" and destination:
+            # For messages, the destination is reliable
+            channel_info = next((ch for ch in all_channels if ch["channel_id_line"] == destination), None)
+            if channel_info:
+                channel_id = channel_info["id"]
+                access_token = channel_info["token"]
+        # For other events like join/leave, we'll determine the channel inside the loop
+        
+        if not access_token and event.type != "join" and event.type != "leave":
+             logging.warning(f"Could not determine channel for event type {event.type}")
+             continue # Skip to next event if we can't identify the channel
+
+        # 2. Process the event
         # Handle user messages (direct 1-on-1 chat)
-        if event.type == "message" and event.source.userId:
+        if event.type == "message" and event.source.userId and channel_id:
             user_id = event.source.userId
             profile_url = f"https://api.line.me/v2/bot/profile/{user_id}"
             headers = {"Authorization": f"Bearer {access_token}"}
@@ -447,35 +456,44 @@ def line_webhook(payload: LineWebhook):
                 continue
 
             chat_name = f"Unknown Chat ({chat_id})"
-            
-            if chat_id.startswith('C'):
+            joined_channel_id = None
+
+            # Iterate through all channels to find which one can access the group
+            for ch in all_channels:
+                current_token = ch["token"]
                 summary_url = f"https://api.line.me/v2/bot/group/{chat_id}/summary"
-                headers = {"Authorization": f"Bearer {access_token}"}
+                headers = {"Authorization": f"Bearer {current_token}"}
                 try:
-                    res = requests.get(summary_url, headers=headers, timeout=5)
+                    res = requests.get(summary_url, headers=headers, timeout=3)
                     if res.status_code == 200:
                         summary = res.json()
                         chat_name = summary.get("groupName", f"Group ({chat_id})")
-                except requests.RequestException as e:
-                    logging.error(f"Could not fetch group summary for GID {chat_id}: {e}")
-
-            elif chat_id.startswith('R'):
-                chat_name = f"Room ({chat_id})"
-
-            logging.info(f"Bot joined chat: {chat_name} ({chat_id}) for channel {channel_id}")
-            with get_conn() as conn:
-                conn.execute(
-                    "INSERT INTO line_groups (group_id, group_name, channel_id) VALUES (?, ?, ?) ON CONFLICT(group_id, channel_id) DO UPDATE SET group_name=excluded.group_name",
-                    (chat_id, chat_name, channel_id)
-                )
+                        joined_channel_id = ch["id"]
+                        logging.info(f"Bot from channel ID {joined_channel_id} joined group '{chat_name}' ({chat_id}).")
+                        break # Found the correct channel
+                except requests.RequestException:
+                    # This is expected to fail for channels not in the group
+                    continue
+            
+            if joined_channel_id:
+                with get_conn() as conn:
+                    conn.execute(
+                        "INSERT INTO line_groups (group_id, group_name, channel_id) VALUES (?, ?, ?) ON CONFLICT(group_id, channel_id) DO UPDATE SET group_name=excluded.group_name",
+                        (chat_id, chat_name, joined_channel_id)
+                    )
+            else:
+                logging.error(f"Bot joined group {chat_id}, but could not determine which channel it was.")
 
         # Handle bot leaving a group or room
         elif event.type == "leave":
             chat_id = event.source.groupId if event.source.groupId else event.source.roomId
             if chat_id:
-                logging.info(f"Bot left chat: {chat_id} for channel {channel_id}")
+                # Since the bot has left, we can't query the group summary.
+                # We have to assume the leave event applies to any channel that had this group_id.
+                # This is a limitation of the LINE API.
+                logging.info(f"Bot left chat: {chat_id}. Removing from all associated channels.")
                 with get_conn() as conn:
-                    conn.execute("DELETE FROM line_groups WHERE group_id = ? AND channel_id = ?", (chat_id, channel_id))
+                    conn.execute("DELETE FROM line_groups WHERE group_id = ?", (chat_id,))
 
     return {"ok": True}
 
@@ -512,12 +530,41 @@ def list_line_channels():
 @app.post("/line/channels", response_model=LineChannel)
 def add_line_channel(payload: LineChannelCreate):
     """Adds a new LINE channel."""
+    # 1. Verify token and get bot info
+    bot_info_url = "https://api.line.me/v2/bot/info"
+    token = payload.token.strip()
+    name = payload.name.strip()
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        res = requests.get(bot_info_url, headers=headers, timeout=5)
+        res.raise_for_status()
+        bot_info = res.json()
+        channel_id_line = bot_info.get("userId")
+        if not channel_id_line:
+            raise HTTPException(status_code=400, detail="Could not retrieve bot user ID from token. Is it a valid Messaging API token?")
+    except requests.HTTPError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid token. LINE API returned status {e.response.status_code}.")
+    except requests.RequestException as e:
+        logging.error(f"Failed to verify LINE token: {e}")
+        raise HTTPException(status_code=500, detail="Could not contact LINE API to verify token.")
+
+    # 2. Add to database
     with get_conn() as conn:
+        # Check if bot user ID already exists
+        existing_bot = conn.execute("SELECT id FROM line_channels WHERE channel_id_line = ?", (channel_id_line,)).fetchone()
+        if existing_bot:
+            raise HTTPException(status_code=400, detail="A channel for this bot already exists.")
+        
         try:
-            cur = conn.execute("INSERT INTO line_channels(name, token) VALUES (?, ?)", (payload.name.strip(), payload.token.strip()))
+            cur = conn.execute(
+                "INSERT INTO line_channels(name, token, channel_id_line) VALUES (?, ?, ?)", 
+                (name, token, channel_id_line)
+            )
             cid = cur.lastrowid
         except sqlite3.IntegrityError:
+            # This will catch duplicate names
             raise HTTPException(status_code=400, detail="Channel name already exists.")
+        
         row = conn.execute("SELECT id, name, token FROM line_channels WHERE id = ?", (cid,)).fetchone()
         return LineChannel(id=row["id"], name=row["name"], token=row["token"])
 

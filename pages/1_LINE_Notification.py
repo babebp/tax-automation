@@ -123,7 +123,7 @@ with tab1:
                         send_res = requests.post(f"{API_BASE}/line/send_message", json=payload)
                         send_res.raise_for_status()
                         sent_count = send_res.json().get("sent_count", 0)
-                        st.success(f"ส่งข้อความสำเร็จ ({sent_count} получатели)")
+                        st.success(f"ส่งข้อความสำเร็จ ({sent_count})")
                         st.balloons()
                     except requests.HTTPError as e:
                         detail = e.response.json().get("detail", str(e))
