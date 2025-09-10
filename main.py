@@ -624,20 +624,41 @@ class GoogleDriveFolder(BaseModel):
     name: str
 
 @app.get("/google-drive/folders", response_model=List[GoogleDriveFolder])
-def list_google_drive_folders():
-    """Lists all folders accessible by the service account in Google Drive."""
+def list_google_drive_folders(parent_folder_name: Optional[str] = None):
+    """
+    Lists folders. If parent_folder_name is provided, lists direct child folders.
+    Otherwise, lists all accessible folders.
+    """
     try:
         drive_service = gd.get_drive_service()
-        # Query for all folders accessible by the service account.
-        # This is simpler and more robust than checking ownership.
-        query = "mimeType = 'application/vnd.google-apps.folder'"
         
+        if parent_folder_name and parent_folder_name.strip():
+            # 1. Find parent folder ID
+            # Ensure the name is properly escaped for the query
+            safe_name = parent_folder_name.strip().replace("'", "\'\'")
+            parent_query = f"name = '{safe_name}' and mimeType = 'application/vnd.google-apps.folder'"
+            parent_folders = gd.find_files(drive_service, parent_query)
+            
+            if not parent_folders:
+                logging.warning(f"Parent folder '{parent_folder_name}' not found.")
+                return [] # Return empty list if parent not found
+            
+            parent_folder_id = parent_folders[0]['id']
+            logging.info(f"Found parent folder '{parent_folder_name}' with ID: {parent_folder_id}")
+            
+            # 2. Find child folders
+            query = f"'{parent_folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder'"
+        else:
+            # Default behavior: find all folders
+            query = "mimeType = 'application/vnd.google-apps.folder'"
+
         folders = gd.find_files(drive_service, query)
         return [GoogleDriveFolder(id=f['id'], name=f['name']) for f in folders]
     except FileNotFoundError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Google Drive API error: {e}")
+
 
 # ---------- Workflow endpoints ----------
 @app.post("/workflow/start")

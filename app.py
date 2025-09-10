@@ -119,53 +119,61 @@ with tab1:
             st.session_state.show_folder_selection = not st.session_state.show_folder_selection
 
         if st.session_state.show_folder_selection:
-            try:
-                with st.spinner("กำลังโหลดรายชื่อ Folder..."):
-                    folders_res = requests.get(f"{API_BASE}/google-drive/folders")
-                    folders_res.raise_for_status()
-                    drive_folders = folders_res.json()
-                
-                folder_options = {f["name"]: f["id"] for f in drive_folders}
-                
-                # Add a search box to filter folders
-                search_term = st.text_input("Search for a folder:", "")
-                
-                filtered_folder_names = [name for name in folder_options.keys() if search_term.lower() in name.lower()]
+            parent_folder_name = st.text_input(
+                "Enter Parent Folder Name to search in:", 
+                placeholder="e.g., _0.ปิดงบการเงินปี2568_2025"
+            )
 
-                current_folder_name = selected_company.get("google_drive_folder_name")
-                
+            if parent_folder_name and parent_folder_name.strip():
                 try:
-                    current_index = filtered_folder_names.index(current_folder_name) if current_folder_name in filtered_folder_names else 0
-                except ValueError:
-                    current_index = 0
+                    with st.spinner(f"Loading child folders from '{parent_folder_name}'..."):
+                        params = {"parent_folder_name": parent_folder_name.strip()}
+                        folders_res = requests.get(f"{API_BASE}/google-drive/folders", params=params)
+                        folders_res.raise_for_status()
+                        drive_folders = folders_res.json()
+                    
+                    if not drive_folders:
+                        st.warning(f"No child folders found in '{parent_folder_name}', or the parent folder itself was not found.")
+                    else:
+                        folder_options = {f["name"]: f["id"] for f in drive_folders}
+                        
+                        current_folder_name = selected_company.get("google_drive_folder_name")
+                        folder_names = list(folder_options.keys())
+                        
+                        try:
+                            current_index = folder_names.index(current_folder_name) if current_folder_name in folder_names else 0
+                        except ValueError:
+                            current_index = 0
 
-                selected_folder_name = st.selectbox(
-                    "Select a folder from Google Drive", 
-                    options=filtered_folder_names,
-                    index=current_index
-                )
-
-                col1, col2, _ = st.columns([1, 1, 4])
-                with col1:
-                    if st.button("💾 บันทึก", type="primary"):
-                        selected_folder_id = folder_options[selected_folder_name]
-                        company_id_to_update = st.session_state.selected_company_id_for_folder
-                        update_res = requests.put(
-                            f"{API_BASE}/companies/{company_id_to_update}/google-drive-folder",
-                            json={"google_drive_folder_id": selected_folder_id, "google_drive_folder_name": selected_folder_name}
+                        selected_folder_name = st.selectbox(
+                            "Select a child folder (you can type to search)", 
+                            options=folder_names,
+                            index=current_index
                         )
-                        update_res.raise_for_status()
-                        st.success(f"เลือก Folder '{selected_folder_name}' เรียบร้อยแล้ว")
-                        st.session_state.show_folder_selection = False
-                        st.rerun()
-                with col2:
-                    if st.button("ยกเลิก"):
-                        st.session_state.show_folder_selection = False
-                        st.rerun()
 
-            except Exception as e:
-                st.error(f"ไม่สามารถโหลดรายชื่อ Folder ได้: {e}")
-                st.session_state.show_folder_selection = False
+                        if selected_folder_name:
+                            col1, col2, _ = st.columns([1, 1, 4])
+                            with col1:
+                                if st.button("💾 บันทึก", type="primary"):
+                                    selected_folder_id = folder_options[selected_folder_name]
+                                    company_id_to_update = st.session_state.selected_company_id_for_folder
+                                    update_res = requests.put(
+                                        f"{API_BASE}/companies/{company_id_to_update}/google-drive-folder",
+                                        json={"google_drive_folder_id": selected_folder_id, "google_drive_folder_name": selected_folder_name}
+                                    )
+                                    update_res.raise_for_status()
+                                    st.success(f"เลือก Folder '{selected_folder_name}' เรียบร้อยแล้ว")
+                                    st.session_state.show_folder_selection = False
+                                    st.rerun()
+                            with col2:
+                                if st.button("ยกเลิก"):
+                                    st.session_state.show_folder_selection = False
+                                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"Could not load child folders: {e}")
+            else:
+                st.info("Please enter a parent folder name to begin.")
         
         st.divider()
 
