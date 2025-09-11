@@ -216,7 +216,7 @@ def get_amount_from_gemini(file_content: bytes, prompt: str) -> str:
         return "No file content"
 
     try:
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": file_content}])
         return response.text.strip()
     except Exception as e:
