@@ -800,10 +800,19 @@ def start_workflow(payload: WorkflowStart):
         for row in tb_sheet.iter_rows(min_row=2):
             tb_code = row[0].value
             if tb_code:
-                val_col7 = row[6].value if len(row) > 6 else 0
-                val_col8 = row[7].value if len(row) > 7 else 0
-                amount = 0
-                if val_col7 and val_col7 > 0:
+                # Safely convert cell values to float, defaulting to 0.0 on error
+                try:
+                    val_col7 = float(row[6].value) if len(row) > 6 and row[6].value is not None else 0.0
+                except (ValueError, TypeError):
+                    val_col7 = 0.0
+                
+                try:
+                    val_col8 = float(row[7].value) if len(row) > 7 and row[7].value is not None else 0.0
+                except (ValueError, TypeError):
+                    val_col8 = 0.0
+
+                amount = 0.0
+                if val_col7 > 0:
                     amount = val_col7
                 elif val_col8:
                     amount = -val_col8
