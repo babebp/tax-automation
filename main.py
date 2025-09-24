@@ -1113,9 +1113,10 @@ def start_reconcile(payload: ReconcileStart):
             gl_sheet = gl_wb.active
 
             if "gl_subsheet" in payload.parts:
-                # Efficiently copy the entire GL sheet instead of looping
-                gl_ws = wb.copy_worksheet(gl_sheet)
-                gl_ws.title = "GL"
+                gl_ws = wb.create_sheet(title="GL")
+                for row in gl_sheet.iter_rows():
+                    for cell in row:
+                        gl_ws[cell.coordinate].value = cell.value
 
             # --- OPTIMIZED SINGLE LOOP ---
             if any(part in payload.parts for part in ["tb_code_subsheets", "pp30_subsheet"]):
