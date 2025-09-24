@@ -1122,14 +1122,16 @@ def start_reconcile(payload: ReconcileStart):
             if any(part in payload.parts for part in ["tb_code_subsheets", "pp30_subsheet"]):
                 
                 # --- Pre-loop setup ---
-                revenue_tb_code = None
+                revenue_tb_codes = []
                 credit_note_tb_code = None
                 if "pp30_subsheet" in payload.parts:
                     with get_conn() as conn:
-                        forms_cursor = conn.execute("SELECT form_type, tb_code FROM company_forms WHERE company_id = ?", (payload.company_id,))
-                        forms_map = {row['form_type']: row['tb_code'] for row in forms_cursor.fetchall()}
-                    revenue_tb_code = forms_map.get("Revenue")
-                    credit_note_tb_code = forms_map.get("Credit Note")
+                        # Dynamically get all form types starting with "Revenue"
+                        forms_cursor = conn.execute("SELECT form_type, tb_code FROM company_forms WHERE company_id = ? AND form_type LIKE 'Revenue%' ORDER BY form_type", (payload.company_id,))
+                        revenue_forms = forms_cursor.fetchall()
+                        revenue_tb_codes = [row['tb_code'] for row in revenue_forms]
+                        
+                        credit_note_tb_code = forms_map.get("Credit Note")
 
                 # --- Loop Execution ---
                 gl_rows = list(gl_sheet.iter_rows(values_only=True))
@@ -1141,26 +1143,32 @@ def start_reconcile(payload: ReconcileStart):
                     row = gl_rows[i]
                     row_str = str(row[0]) if row and row[0] else ""
 
-                    is_revenue_header = revenue_tb_code and revenue_tb_code in row_str
+                    # Check if the current row's TB code matches any of the revenue TB codes or the credit note TB code
+                    is_revenue_header = any(code in row_str for code in revenue_tb_codes)
                     is_credit_note_header = credit_note_tb_code and credit_note_tb_code in row_str
 
                     if "pp30_subsheet" in payload.parts and (is_revenue_header or is_credit_note_header):
-                        target_sheet_name = "รายได้" if is_revenue_header else "ลดหนี้"
-                        if target_sheet_name not in wb.sheetnames:
+                        target_sheet_name = ""
+                        if is_revenue_header:
+                            target_sheet_name = "รายได้"
+                        elif is_credit_note_header:
+                            target_sheet_name = "ลดหนี้"
+
+                        if target_sheet_name and target_sheet_name not in wb.sheetnames:
                             wb.create_sheet(title=target_sheet_name)
                         
-                        data_block_start_index = i + 2
-                        block_i = data_block_start_index
-                        while block_i < len(gl_rows):
-                            block_row = gl_rows[block_i]
-                            if block_row and block_row[0] is not None and str(block_row[0]).strip():
-                                wb[target_sheet_name].append(block_row)
-                                block_i += 1
-                            else:
-                                break
-                        
-                        i = block_i
-                        continue
+                        if target_sheet_name:
+                            data_block_start_index = i + 2
+                            block_i = data_block_start_index
+                            while block_i < len(gl_rows):
+                                block_row = gl_rows[block_i]
+                                if block_row and block_row[0] is not None and str(block_row[0]).strip():
+                                    wb[target_sheet_name].append(block_row)
+                                    block_i += 1
+                                else:
+                                    break
+                            i = block_i
+                            continue
 
                     if "tb_code_subsheets" in payload.parts:
                         if "ลำดับที่" in row_str and i > 0:
@@ -1196,71 +1204,44 @@ def start_reconcile(payload: ReconcileStart):
                         ws.append(data_row)
 
                 if "pp30_subsheet" in payload.parts:
-                    # Helper function to perform calculations on sub-sheets
-                    def _calculate_monthly_totals(sheet):
-                        monthly_totals = {m: 0 for m in range(1, 13)}
-                        if not sheet:
-                            return monthly_totals
-                        
-                        # Add a header for the new column I if it doesn't exist
-                        if sheet.max_column < 9:
-                           sheet.cell(row=1, column=9).value = 'Calculated Total'
-
-                        for row_idx in range(0, sheet.max_row + 1): # Start from row 1 to include header
-                            try:
-                                val_g = sheet.cell(row=row_idx, column=7).value
-                                val_h = sheet.cell(row=row_idx, column=8).value
-                                num_g = float(val_g) if val_g is not None else 0
-                                num_h = -1 * float(val_h) if val_h is not None else 0
-                                total = num_g + num_h # Changed to subtraction
-                                # sheet.cell(row=row_idx, column=9).value = total_i
-
-                                date_cell = sheet.cell(row=row_idx, column=3).value
-                                month = None
-                                if isinstance(date_cell, datetime):
-                                    month = date_cell.month
-                                elif isinstance(date_cell, str):
-                                    try:
-                                        # Attempt to parse a string into a datetime object.
-                                        # This handles common formats like 'YYYY-MM-DD' or 'DD/MM/YYYY'.
-                                        # It splits on space to handle cases with timestamps like 'YYYY-MM-DD HH:MM:SS'
-                                        date_str = date_cell.split()[0]
-                                        if '-' in date_str:
-                                            month = datetime.strptime(date_str, '%Y-%m-%d').month
-                                        elif '/' in date_str:
-                                            month = datetime.strptime(date_str, '%d/%m/%Y').month
-                                    except ValueError:
-                                        # If parsing fails, print a warning and skip to the next row.
-                                        # print(f"Skipping row {row_idx}: Could not parse date string '{date_cell}'")
-                                        continue
-                                
-                                if month:
-                                    monthly_totals[month] += total
-                            except (ValueError, TypeError):
-                                # This will catch errors from float conversion on header row
-                                continue
-                        return monthly_totals
-
-                    # Calculate totals from "รายได้" and "ลดหนี้" sheets
-                    revenue_totals = _calculate_monthly_totals(wb["รายได้"] if "รายได้" in wb.sheetnames else None)
-                    credit_note_totals = _calculate_monthly_totals(wb["ลดหนี้"] if "ลดหนี้" in wb.sheetnames else None)
+                    # Calculate totals for each revenue TB code
+                    all_revenue_monthly_totals = {}
+                    for idx, tb_code in enumerate(revenue_tb_codes):
+                        all_revenue_monthly_totals[f"Revenue_{idx+1}"] = _calculate_monthly_totals(gl_rows, tb_code)
+                    
+                    credit_note_totals = _calculate_monthly_totals(gl_rows, credit_note_tb_code) if credit_note_tb_code else {m: 0 for m in range(1, 13)}
 
                     # Create and populate the PP30 sheet
                     if "PP30" not in wb.sheetnames:
                         pp30_ws = wb.create_sheet(title="PP30")
                         pp30_ws['C4'] = "เดือน"
                         pp30_ws['D4'] = "PP30"
-                        pp30_ws['E4'] = "รายได้"
-                        pp30_ws['F4'] = "ลดหนี้"
-                        pp30_ws['G4'] = "Diff"
+                        
+                        # Dynamically add headers for Revenue columns
+                        for idx in range(len(revenue_tb_codes)):
+                            pp30_ws.cell(row=4, column=5 + idx, value=f"รายได้ {idx+1}" if idx > 0 else "รายได้")
+                        
+                        # Adjust column for Credit Note and Diff based on number of revenue columns
+                        credit_note_col_idx = 5 + len(revenue_tb_codes)
+                        diff_col_idx = credit_note_col_idx + 1
+                        
+                        pp30_ws.cell(row=4, column=credit_note_col_idx, value="ลดหนี้")
+                        pp30_ws.cell(row=4, column=diff_col_idx, value="Diff")
+
                         thai_months = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
                         for i, month in enumerate(thai_months):
                             pp30_ws[f'C{i+5}'] = month
                     
                     pp30_ws = wb["PP30"]
-                    for month in range(1, 13):
-                        pp30_ws[f'E{month+4}'] = revenue_totals[month] if revenue_totals[month] != 0 else "-"
-                        pp30_ws[f'F{month+4}'] = credit_note_totals[month] if credit_note_totals[month] != 0 else "-"
+                    for month_num in range(1, 13):
+                        # Populate dynamic "รายได้" columns
+                        for idx in range(len(revenue_tb_codes)):
+                            col_letter = openpyxl.utils.get_column_letter(5 + idx)
+                            pp30_ws[f'{col_letter}{month_num+4}'] = all_revenue_monthly_totals.get(f"Revenue_{idx+1}", {}).get(month_num, 0) if all_revenue_monthly_totals.get(f"Revenue_{idx+1}", {}).get(month_num, 0) != 0 else "-"
+
+                        # Populate "ลดหนี้" column
+                        credit_note_col_letter = openpyxl.utils.get_column_letter(5 + len(revenue_tb_codes))
+                        pp30_ws[f'{credit_note_col_letter}{month_num+4}'] = credit_note_totals.get(month_num, 0) if credit_note_totals.get(month_num, 0) != 0 else "-"
 
         # --- This block is now outside the GL file check ---
         if "pp30_subsheet" in payload.parts:
