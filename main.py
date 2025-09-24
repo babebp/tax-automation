@@ -769,7 +769,7 @@ def start_workflow(payload: WorkflowStart):
         logging.info(f"VAT folder found with id: {vat_folder_id}, searching for files.")
         year_short = str(payload.year)[-2:]
         vat_file_search_term = f"VAT{payload.month}_{year_short}"
-        vat_files_query = f"'{vat_folder_id}' in parents and name contains '{vat_file_search_term}' and mimeType = 'application/vnd.ms-excel'"
+        vat_files_query = f"'{vat_folder_id}' in parents and name contains '{vat_file_search_term}' and (mimeType = 'application/vnd.ms-excel' or mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')"
         vat_files = gd.find_files(drive_service, vat_files_query)
     logging.info(f"Found {len(vat_files)} VAT files: {[f['name'] for f in vat_files]}")
 
@@ -839,7 +839,7 @@ def start_workflow(payload: WorkflowStart):
             while not done:
                 status, done = downloader.next_chunk()
             fh.seek(0)
-            df = pd.read_excel(fh, engine='xlrd', header=None)
+            df = pd.read_excel(fh, header=None)
             for index, row in df.iterrows():
                 if len(row) > 3:
                     cell_value = str(row.iloc[1])
