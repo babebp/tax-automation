@@ -785,9 +785,18 @@ def start_workflow(payload: WorkflowStart):
     tb_files_query = f"'{company_folder_id}' in parents and name contains 'tb' and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
     tb_files = gd.find_files(drive_service, tb_files_query)
     tb_data = {}
+
+    correct_tb_file = None
     if tb_files:
-        tb_file_id = tb_files[0]['id']
-        logging.info(f"TB file found with id: {tb_file_id}")
+        suffix = f"{payload.year}{payload.month}.xlsx"
+        for f in tb_files:
+            if f['name'].endswith(suffix):
+                correct_tb_file = f
+                break
+    
+    if correct_tb_file:
+        tb_file_id = correct_tb_file['id']
+        logging.info(f"TB file found: {correct_tb_file['name']} (id: {tb_file_id})")
         request = drive_service.files().get_media(fileId=tb_file_id)
         fh = BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
@@ -818,7 +827,7 @@ def start_workflow(payload: WorkflowStart):
                     amount = -val_col8
                 tb_data[str(tb_code)] = amount
     else:
-        logging.warning("TB file not found.")
+        logging.warning(f"TB file for {payload.year}{payload.month} not found.")
 
     # Process VAT files for "Excel Actual Column"
     vat_amounts = {}
