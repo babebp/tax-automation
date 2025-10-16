@@ -178,6 +178,7 @@ class WorkflowStart(BaseModel):
 
 class ReconcileStart(BaseModel):
     company_id: int
+    month: str
     year: int
     parts: List[str]
 
@@ -1082,11 +1083,20 @@ def start_reconcile(payload: ReconcileStart):
         logging.info("5.1. Looking for TB file in Google Drive.")
         tb_files_query = f"'{company_folder_id}' in parents and name contains 'tb' and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
         tb_files = gd.find_files(drive_service, tb_files_query)
-        if not tb_files:
+        
+        correct_tb_file = None
+        if tb_files:
+            suffix = f"{payload.year}{payload.month}.xlsx"
+            for f in tb_files:
+                if f['name'].endswith(suffix):
+                    correct_tb_file = f
+                    break
+
+        if not correct_tb_file:
             logging.error("[TB Sub-sheet] TB file not found.")
             raise HTTPException(status_code=404, detail="TB file not found for TB Sub-sheet.")
 
-        tb_file_id = tb_files[0]['id']
+        tb_file_id = correct_tb_file['id']
         logging.info(f"5.2. Found TB file with id: {tb_file_id}. Downloading and loading.")
         request = drive_service.files().get_media(fileId=tb_file_id)
         fh = BytesIO()
@@ -1162,8 +1172,16 @@ def start_reconcile(payload: ReconcileStart):
         gl_files_query = f"'{company_folder_id}' in parents and name contains 'gl' and mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'"
         gl_files = gd.find_files(drive_service, gl_files_query)
         
+        correct_gl_file = None
         if gl_files:
-            gl_file_id = gl_files[0]['id']
+            suffix = f"{payload.year}{payload.month}.xlsx"
+            for f in gl_files:
+                if f['name'].endswith(suffix):
+                    correct_gl_file = f
+                    break
+
+        if correct_gl_file:
+            gl_file_id = correct_gl_file['id']
             logging.info(f"6.1. Found GL file with id: {gl_file_id}. Downloading and loading.")
             request = drive_service.files().get_media(fileId=gl_file_id)
             fh = BytesIO()

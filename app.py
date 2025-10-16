@@ -331,7 +331,10 @@ with tab3:
 
         current_year = 2025
         years = list(range(2021, current_year + 1))
+        months = [f"{i:02d}" for i in range(1, 13)]
+        selected_month = st.selectbox("เลือกเดือน", options=months, key="reconcile_month_select")
         selected_year = st.selectbox("เลือกปี", options=years, index=len(years) - 1, key="reconcile_year_select")
+
 
         st.divider()
         st.subheader("Select parts to run:")
@@ -358,6 +361,7 @@ with tab3:
                     r = requests.post(f"{API_BASE}/reconcile/start", json={
                         "company_id": cid,
                         "year": selected_year,
+                        "month": selected_month,
                         "parts": parts_to_run
                     }, stream=True)
                     r.raise_for_status()
