@@ -241,7 +241,8 @@ with tab1:
                 
                 st.divider()
                 st.markdown("#### Reconcile Settings")
-                form_inputs["Revenue"] = st.text_input("รายได้ TB Code", value=current.get("Revenue", ""), key=f"tb_revenue_{cid}")
+                form_inputs["Revenue"] = st.text_input("รายได้ TB Code 1", value=current.get("Revenue", ""), key=f"tb_revenue_{cid}")
+                form_inputs["Revenue2"] = st.text_input("รายได้ TB Code 2", value=current.get("Revenue2", ""), key=f"tb_revenue2_{cid}")
                 form_inputs["Credit Note"] = st.text_input("ลดหนี้ TB Code", value=current.get("Credit Note", ""), key=f"tb_credit_note_{cid}")
 
                 submitted = st.form_submit_button("Save", type="primary")

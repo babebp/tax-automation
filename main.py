@@ -237,7 +237,7 @@ def clean_and_convert_to_float(text: str) -> Optional[float]:
     return None
 
 # ---------- Constants ----------
-FIXED_FORMS = ["PND1", "PND3", "PND53", "PP30", "SSO", "Revenue", "Credit Note"]
+FIXED_FORMS = ["PND1", "PND3", "PND53", "PP30", "SSO", "Revenue", "Revenue2", "Credit Note"]
 
 PROMPTS = {
     "BANK": "หายอดคงเหลืสุดท้ายให้หน่อย ตอบมาแค่ตัวเลขเท่านั้น ห้ามมีตัวหนังสืออื่นๆเด็ดขาด",
