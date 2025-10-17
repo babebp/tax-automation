@@ -1237,9 +1237,8 @@ def start_reconcile(payload: ReconcileStart):
                 logging.info("7. [GL Sub-sheet] Starting GL sub-sheet creation.")
                 gl_ws = wb.create_sheet(title="GL")
                 logging.info("7.1. Copying all data from source GL to result 'GL' sheet.")
-                for row in gl_sheet.iter_rows():
-                    for cell in row:
-                        gl_ws[cell.coordinate].value = cell.value
+                for row_values in gl_sheet.iter_rows(values_only=True):
+                    gl_ws.append(row_values)
                 logging.info("7.2. [GL Sub-sheet] Finished GL sub-sheet creation.")
 
             # --- tb_code_subsheets Part ---
