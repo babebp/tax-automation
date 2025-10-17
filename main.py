@@ -1231,20 +1231,21 @@ def start_reconcile(payload: ReconcileStart):
             fh.seek(0)
             gl_wb = openpyxl.load_workbook(fh, data_only=True, read_only=True)
             gl_sheet = gl_wb.active
-            logging.info("6.2. GL file loaded.")
+            logging.info("6.2. GL file loaded. Reading all rows into memory.")
+            gl_rows = list(gl_sheet.iter_rows(values_only=True))
+            logging.info("6.2.1. All GL rows loaded into memory.")
 
             if "gl_subsheet" in payload.parts:
                 logging.info("7. [GL Sub-sheet] Starting GL sub-sheet creation.")
                 gl_ws = wb.create_sheet(title="GL")
                 logging.info("7.1. Copying all data from source GL to result 'GL' sheet.")
-                for row_values in gl_sheet.iter_rows(values_only=True):
+                for row_values in gl_rows:
                     gl_ws.append(row_values)
                 logging.info("7.2. [GL Sub-sheet] Finished GL sub-sheet creation.")
 
             # --- tb_code_subsheets Part ---
             if "tb_code_subsheets" in payload.parts:
                 logging.info("8. [TB Code Sub-sheets] Starting TB code sub-sheet creation.")
-                gl_rows = list(gl_sheet.iter_rows(values_only=True))
                 i = 0
                 account_data_block = []
                 current_account_number = None
@@ -1296,8 +1297,6 @@ def start_reconcile(payload: ReconcileStart):
                 revenue2_tb_code = forms_map.get("Revenue2")
                 credit_note_tb_code = forms_map.get("Credit Note")
                 logging.info(f"9.2. Found Revenue TB code: {revenue_tb_code}, Revenue2 TB code: {revenue2_tb_code}, Credit Note TB code: {credit_note_tb_code}")
-
-                gl_rows = list(gl_sheet.iter_rows(values_only=True))
                 
                 # --- Extract Data Blocks ---
                 logging.info("9.3. Extracting data blocks from GL file.")
