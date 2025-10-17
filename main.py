@@ -1397,24 +1397,6 @@ def start_reconcile(payload: ReconcileStart):
                     pp30_ws[f'G{month_num+4}'] = credit_note_totals.get(month_num, 0) if credit_note_totals.get(month_num, 0) != 0 else "-"
                 logging.info("9.10. [PP30 Sub-sheet] Finished populating with GL data.")
 
-                # --- Create and Populate PP30 (2) Sheet ---
-                logging.info("9.11. Creating and populating 'PP30 (2)' sheet.")
-                pp30_ws_2 = wb.create_sheet(title="PP30 (2)")
-                pp30_ws_2['C4'] = "เดือน"
-                pp30_ws_2['D4'] = "PP30"
-                pp30_ws_2['E4'] = "รายได้"
-                pp30_ws_2['F4'] = "ลดหนี้"
-                pp30_ws_2['G4'] = "Diff"
-                thai_months = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
-                for i, month in enumerate(thai_months):
-                    pp30_ws_2[f'C{i+5}'] = month
-                
-                for month_num in range(1, 13):
-                    # Use revenue2_totals for the "รายได้" column in this sheet
-                    pp30_ws_2[f'E{month_num+4}'] = revenue2_totals.get(month_num, 0) if revenue2_totals.get(month_num, 0) != 0 else "-"
-                    pp30_ws_2[f'F{month_num+4}'] = credit_note_totals.get(month_num, 0) if credit_note_totals.get(month_num, 0) != 0 else "-"
-                logging.info("9.12. [PP30 (2) Sub-sheet] Finished populating with GL data.")
-
         else:
             logging.warning("6. [GL Parts] GL file not found. Skipping GL-dependent parts.")
 
@@ -1422,9 +1404,7 @@ def start_reconcile(payload: ReconcileStart):
     if "pp30_subsheet" in payload.parts:
         logging.info("10. [PP30 Sub-sheet] Starting to populate PP30 data from monthly PDF files.")
         
-        # Get both sheets if they exist
         pp30_ws = wb["PP30"] if "PP30" in wb.sheetnames else None
-        pp30_ws_2 = wb["PP30 (2)"] if "PP30 (2)" in wb.sheetnames else None
 
         if not pp30_ws:
             logging.info("10.1. 'PP30' sheet not found, creating it now.")
@@ -1464,24 +1444,17 @@ def start_reconcile(payload: ReconcileStart):
                         logging.warning(f"Could not convert '{amount_str}' to a number for PP30 month {month_str}.")
                         amount = amount_str
                     
-                    # Populate both sheets with the same PDF data
                     if pp30_ws:
                         pp30_ws[f'D{i+5}'] = amount if amount is not None else "-"
-                    if pp30_ws_2:
-                        pp30_ws_2[f'D{i+5}'] = amount if amount is not None else "-"
                 else:
                     logging.info(f"10.5. No PP30 PDF found for month {month_str}.")
                     if pp30_ws:
                         pp30_ws[f'D{i+5}'] = "-"
-                    if pp30_ws_2:
-                        pp30_ws_2[f'D{i+5}'] = "-"
         else:
             logging.warning("10.3. 'ภพ30' folder not found. Skipping PDF data extraction for PP30.")
             for i in range(12):
                 if pp30_ws:
                     pp30_ws[f'D{i+5}'] = "-"
-                if pp30_ws_2:
-                    pp30_ws_2[f'D{i+5}'] = "-"
         logging.info("10.7. [PP30 Sub-sheet] Finished populating with PDF data.")
     
     # Save and return workbook
