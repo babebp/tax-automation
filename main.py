@@ -1308,51 +1308,57 @@ def start_reconcile(payload: ReconcileStart):
                     for i, row in enumerate(gl_rows):
                         row_str = str(row[0]) if row and row[0] else ""
                         if revenue_tb_code in row_str:
-                            logging.info("9.4. Found 'รายได้' data block. Creating sheet and extracting data.")
-                            ws = wb.create_sheet(title="รายได้")
+                            logging.info("9.4. Found 'รายได้' data block. Extracting data.")
+                            if "รายได้" not in wb.sheetnames:
+                                ws = wb.create_sheet(title="รายได้")
+                            else:
+                                ws = wb["รายได้"]
+                            
                             block_i = i + 2
                             while block_i < len(gl_rows):
                                 block_row = gl_rows[block_i]
-                                if block_row and block_row[0] is not None and str(block_row[0]).strip():
-                                    ws.append(block_row)
-                                    block_i += 1
-                                else:
+                                if not (block_row and block_row[0] is not None and str(block_row[0]).strip()):
                                     break
-                            break 
+                                ws.append(block_row)
+                                block_i += 1
 
                 # Extract Revenue 2
                 if revenue2_tb_code:
                     for i, row in enumerate(gl_rows):
                         row_str = str(row[0]) if row and row[0] else ""
                         if revenue2_tb_code in row_str:
-                            logging.info("9.4.1. Found 'รายได้ 2' data block. Creating sheet and extracting data.")
-                            ws = wb.create_sheet(title="รายได้ 2")
+                            logging.info("9.4.1. Found 'รายได้ 2' data block. Extracting data.")
+                            if "รายได้ 2" not in wb.sheetnames:
+                                ws = wb.create_sheet(title="รายได้ 2")
+                            else:
+                                ws = wb["รายได้ 2"]
+
                             block_i = i + 2
                             while block_i < len(gl_rows):
                                 block_row = gl_rows[block_i]
-                                if block_row and block_row[0] is not None and str(block_row[0]).strip():
-                                    ws.append(block_row)
-                                    block_i += 1
-                                else:
+                                if not (block_row and block_row[0] is not None and str(block_row[0]).strip()):
                                     break
-                            break
+                                ws.append(block_row)
+                                block_i += 1
 
                 # Extract Credit Note
                 if credit_note_tb_code:
                     for i, row in enumerate(gl_rows):
                         row_str = str(row[0]) if row and row[0] else ""
                         if credit_note_tb_code in row_str:
-                            logging.info("9.5. Found 'ลดหนี้' data block. Creating sheet and extracting data.")
-                            ws = wb.create_sheet(title="ลดหนี้")
+                            logging.info("9.5. Found 'ลดหนี้' data block. Extracting data.")
+                            if "ลดหนี้" not in wb.sheetnames:
+                                ws = wb.create_sheet(title="ลดหนี้")
+                            else:
+                                ws = wb["ลดหนี้"]
+                            
                             block_i = i + 2
                             while block_i < len(gl_rows):
                                 block_row = gl_rows[block_i]
-                                if block_row and block_row[0] is not None and str(block_row[0]).strip():
-                                    ws.append(block_row)
-                                    block_i += 1
-                                else:
+                                if not (block_row and block_row[0] is not None and str(block_row[0]).strip()):
                                     break
-                            break
+                                ws.append(block_row)
+                                block_i += 1
                 
                 logging.info("9.8. Calculating monthly totals from 'รายได้', 'รายได้ 2', and 'ลดหนี้' sheets.")
                 revenue_totals = {}
