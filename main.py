@@ -1007,7 +1007,7 @@ def _calculate_monthly_totals(gl_rows: list, tb_code: str) -> dict:
 
             if header_skipped:
                 # Assuming date is in the second column (index 1)
-                if row and len(row) > 1 and isinstance(row[1], datetime):
+                if row and len(row) > 1 and hasattr(row[1], 'month'):
                     date = row[1]
                     month = date.month
                     
@@ -1031,6 +1031,42 @@ def _calculate_monthly_totals(gl_rows: list, tb_code: str) -> dict:
                     # The difference (credit - debit) should give the net change.
                     amount = credit - debit
                     monthly_totals[month] += amount
+
+    return monthly_totals
+
+
+def _calculate_totals_from_sheet_data(rows: list) -> dict:
+    """
+    Calculates the monthly totals from a sheet of transactions.
+    Assumes the sheet contains a header row with "ลำดับที่" and then data rows.
+    """
+    monthly_totals = {m: 0 for m in range(1, 13)}
+
+    for row in rows:
+        if not any(row):
+            continue
+
+        if row and len(row) > 1:
+            date = datetime.strptime(row[2], "%d/%m/%Y")
+            month = date.month
+            
+            debit = 0.0
+            credit = 0.0
+
+            if len(row) > 6 and row[6] is not None:
+                try:
+                    debit = float(row[6])
+                except (ValueError, TypeError):
+                    pass
+
+            if len(row) > 7 and row[7] is not None:
+                try:
+                    credit = float(row[7])
+                except (ValueError, TypeError):
+                    pass
+            
+            amount = credit - debit
+            monthly_totals[month] += amount
 
     return monthly_totals
 
@@ -1190,7 +1226,7 @@ def start_reconcile(payload: ReconcileStart):
             while not done:
                 status, done = downloader.next_chunk()
             fh.seek(0)
-            gl_wb = openpyxl.load_workbook(fh, data_only=True)
+            gl_wb = openpyxl.load_workbook(fh, data_only=True, read_only=True)
             gl_sheet = gl_wb.active
             logging.info("6.2. GL file loaded.")
 
@@ -1260,7 +1296,7 @@ def start_reconcile(payload: ReconcileStart):
                     logging.info("9.1. Fetching Revenue and Credit Note TB codes from database.")
                     forms_cursor = conn.execute("SELECT form_type, tb_code FROM company_forms WHERE company_id = ? AND form_type LIKE 'Revenue%' ORDER BY form_type", (payload.company_id,))
                     revenue_forms = forms_cursor.fetchall()
-                    revenue_tb_codes = [row['tb_code'] for row in revenue_forms]
+                    revenue_tb_codes = [row['tb_code'] for row in revenue_forms if row['tb_code']]
                     credit_note_tb_code = forms_map.get("Credit Note")
                     logging.info(f"9.2. Found Revenue TB codes: {revenue_tb_codes}, Credit Note TB code: {credit_note_tb_code}")
 
@@ -1302,35 +1338,34 @@ def start_reconcile(payload: ReconcileStart):
                             continue
                     i += 1
                 
-                logging.info("9.8. Calculating monthly totals for Revenue and Credit Note from GL data.")
-                all_revenue_monthly_totals = {}
-                for idx, tb_code in enumerate(revenue_tb_codes):
-                    all_revenue_monthly_totals[f"Revenue_{idx+1}"] = _calculate_monthly_totals(gl_rows, tb_code)
-                
-                credit_note_totals = _calculate_monthly_totals(gl_rows, credit_note_tb_code) if credit_note_tb_code else {m: 0 for m in range(1, 13)}
+                logging.info("9.8. Calculating monthly totals from 'รายได้' and 'ลดหนี้' sheets.")
+                revenue_totals = {}
+                if "รายได้" in wb.sheetnames:
+                    revenue_rows = list(wb["รายได้"].iter_rows(values_only=True))
+                    revenue_totals = _calculate_totals_from_sheet_data(revenue_rows)
+
+                credit_note_totals = {}
+                if "ลดหนี้" in wb.sheetnames:
+                    credit_note_rows = list(wb["ลดหนี้"].iter_rows(values_only=True))
+                    credit_note_totals = _calculate_totals_from_sheet_data(credit_note_rows)
+
                 logging.info("9.9. Monthly totals calculated. Populating 'PP30' sheet.")
 
                 if "PP30" not in wb.sheetnames:
                     pp30_ws = wb.create_sheet(title="PP30")
                     pp30_ws['C4'] = "เดือน"
                     pp30_ws['D4'] = "PP30"
-                    for idx in range(len(revenue_tb_codes)):
-                        pp30_ws.cell(row=4, column=5 + idx, value=f"รายได้ {idx+1}" if idx > 0 else "รายได้")
-                    credit_note_col_idx = 5 + len(revenue_tb_codes)
-                    diff_col_idx = credit_note_col_idx + 1
-                    pp30_ws.cell(row=4, column=credit_note_col_idx, value="ลดหนี้")
-                    pp30_ws.cell(row=4, column=diff_col_idx, value="Diff")
+                    pp30_ws['E4'] = "รายได้"
+                    pp30_ws['F4'] = "ลดหนี้"
+                    pp30_ws['G4'] = "Diff"
                     thai_months = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
                     for i, month in enumerate(thai_months):
                         pp30_ws[f'C{i+5}'] = month
                 
                 pp30_ws = wb["PP30"]
                 for month_num in range(1, 13):
-                    for idx in range(len(revenue_tb_codes)):
-                        col_letter = openpyxl.utils.get_column_letter(5 + idx)
-                        pp30_ws[f'{col_letter}{month_num+4}'] = all_revenue_monthly_totals.get(f"Revenue_{idx+1}", {}).get(month_num, 0) if all_revenue_monthly_totals.get(f"Revenue_{idx+1}", {}).get(month_num, 0) != 0 else "-"
-                    credit_note_col_letter = openpyxl.utils.get_column_letter(5 + len(revenue_tb_codes))
-                    pp30_ws[f'{credit_note_col_letter}{month_num+4}'] = credit_note_totals.get(month_num, 0) if credit_note_totals.get(month_num, 0) != 0 else "-"
+                    pp30_ws[f'E{month_num+4}'] = revenue_totals.get(month_num, 0) if revenue_totals.get(month_num, 0) != 0 else "-"
+                    pp30_ws[f'F{month_num+4}'] = credit_note_totals.get(month_num, 0) if credit_note_totals.get(month_num, 0) != 0 else "-"
                 logging.info("9.10. [PP30 Sub-sheet] Finished populating with GL data.")
         else:
             logging.warning("6. [GL Parts] GL file not found. Skipping GL-dependent parts.")
