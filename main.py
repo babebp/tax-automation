@@ -1038,7 +1038,7 @@ def _calculate_monthly_totals(gl_rows: list, tb_code: str) -> dict:
 def _calculate_totals_from_sheet_data(rows: list) -> dict:
     """
     Calculates the monthly totals from a sheet of transactions.
-    Assumes the sheet contains a header row with "ลำดับที่" and then data rows.
+    Assumes the sheet contains only data rows.
     """
     monthly_totals = {m: 0 for m in range(1, 13)}
 
@@ -1046,9 +1046,12 @@ def _calculate_totals_from_sheet_data(rows: list) -> dict:
         if not any(row):
             continue
 
-        if row and len(row) > 1:
-            date = datetime.strptime(row[2], "%d/%m/%Y")
-            month = date.month
+        if row and len(row) > 2 and row[2]:
+            try:
+                date = datetime.strptime(str(row[2]), "%d/%m/%Y")
+                month = date.month
+            except (ValueError, TypeError):
+                continue # Skip row if date is not in the expected format
             
             debit = 0.0
             credit = 0.0
@@ -1290,59 +1293,77 @@ def start_reconcile(payload: ReconcileStart):
             # --- pp30_subsheet Part (from GL data) ---
             if "pp30_subsheet" in payload.parts:
                 logging.info("9. [PP30 Sub-sheet] Starting PP30 sub-sheet creation from GL data.")
-                revenue_tb_codes = []
-                credit_note_tb_code = None
-                with get_conn() as conn:
-                    logging.info("9.1. Fetching Revenue and Credit Note TB codes from database.")
-                    forms_cursor = conn.execute("SELECT form_type, tb_code FROM company_forms WHERE company_id = ? AND form_type LIKE 'Revenue%' ORDER BY form_type", (payload.company_id,))
-                    revenue_forms = forms_cursor.fetchall()
-                    revenue_tb_codes = [row['tb_code'] for row in revenue_forms if row['tb_code']]
-                    credit_note_tb_code = forms_map.get("Credit Note")
-                    logging.info(f"9.2. Found Revenue TB codes: {revenue_tb_codes}, Credit Note TB code: {credit_note_tb_code}")
+                revenue_tb_code = forms_map.get("Revenue")
+                revenue2_tb_code = forms_map.get("Revenue2")
+                credit_note_tb_code = forms_map.get("Credit Note")
+                logging.info(f"9.2. Found Revenue TB code: {revenue_tb_code}, Revenue2 TB code: {revenue2_tb_code}, Credit Note TB code: {credit_note_tb_code}")
 
                 gl_rows = list(gl_sheet.iter_rows(values_only=True))
-                i = 0
-                logging.info("9.3. Iterating through GL rows to find and extract Revenue and Credit Note data blocks.")
-                while i < len(gl_rows):
-                    row = gl_rows[i]
-                    row_str = str(row[0]) if row and row[0] else ""
-
-                    is_revenue_header = any(code in row_str for code in revenue_tb_codes)
-                    is_credit_note_header = credit_note_tb_code and credit_note_tb_code in row_str
-
-                    if is_revenue_header or is_credit_note_header:
-                        target_sheet_name = ""
-                        if is_revenue_header:
-                            target_sheet_name = "รายได้"
-                            logging.info("9.4. Found Revenue data block.")
-                        elif is_credit_note_header:
-                            target_sheet_name = "ลดหนี้"
-                            logging.info("9.5. Found Credit Note data block.")
-
-                        if target_sheet_name and target_sheet_name not in wb.sheetnames:
-                            logging.info(f"9.6. Creating sheet '{target_sheet_name}'.")
-                            wb.create_sheet(title=target_sheet_name)
-                        
-                        if target_sheet_name:
-                            logging.info(f"9.7. Extracting data rows for '{target_sheet_name}'.")
-                            data_block_start_index = i + 2
-                            block_i = data_block_start_index
+                
+                # --- Extract Data Blocks ---
+                logging.info("9.3. Extracting data blocks from GL file.")
+                
+                # Extract Revenue 1
+                if revenue_tb_code:
+                    for i, row in enumerate(gl_rows):
+                        row_str = str(row[0]) if row and row[0] else ""
+                        if revenue_tb_code in row_str:
+                            logging.info("9.4. Found 'รายได้' data block. Creating sheet and extracting data.")
+                            ws = wb.create_sheet(title="รายได้")
+                            block_i = i + 2
                             while block_i < len(gl_rows):
                                 block_row = gl_rows[block_i]
                                 if block_row and block_row[0] is not None and str(block_row[0]).strip():
-                                    wb[target_sheet_name].append(block_row)
+                                    ws.append(block_row)
                                     block_i += 1
                                 else:
                                     break
-                            i = block_i
-                            continue
-                    i += 1
+                            break 
+
+                # Extract Revenue 2
+                if revenue2_tb_code:
+                    for i, row in enumerate(gl_rows):
+                        row_str = str(row[0]) if row and row[0] else ""
+                        if revenue2_tb_code in row_str:
+                            logging.info("9.4.1. Found 'รายได้ 2' data block. Creating sheet and extracting data.")
+                            ws = wb.create_sheet(title="รายได้ 2")
+                            block_i = i + 2
+                            while block_i < len(gl_rows):
+                                block_row = gl_rows[block_i]
+                                if block_row and block_row[0] is not None and str(block_row[0]).strip():
+                                    ws.append(block_row)
+                                    block_i += 1
+                                else:
+                                    break
+                            break
+
+                # Extract Credit Note
+                if credit_note_tb_code:
+                    for i, row in enumerate(gl_rows):
+                        row_str = str(row[0]) if row and row[0] else ""
+                        if credit_note_tb_code in row_str:
+                            logging.info("9.5. Found 'ลดหนี้' data block. Creating sheet and extracting data.")
+                            ws = wb.create_sheet(title="ลดหนี้")
+                            block_i = i + 2
+                            while block_i < len(gl_rows):
+                                block_row = gl_rows[block_i]
+                                if block_row and block_row[0] is not None and str(block_row[0]).strip():
+                                    ws.append(block_row)
+                                    block_i += 1
+                                else:
+                                    break
+                            break
                 
-                logging.info("9.8. Calculating monthly totals from 'รายได้' and 'ลดหนี้' sheets.")
+                logging.info("9.8. Calculating monthly totals from 'รายได้', 'รายได้ 2', and 'ลดหนี้' sheets.")
                 revenue_totals = {}
                 if "รายได้" in wb.sheetnames:
                     revenue_rows = list(wb["รายได้"].iter_rows(values_only=True))
                     revenue_totals = _calculate_totals_from_sheet_data(revenue_rows)
+
+                revenue2_totals = {}
+                if "รายได้ 2" in wb.sheetnames:
+                    revenue2_rows = list(wb["รายได้ 2"].iter_rows(values_only=True))
+                    revenue2_totals = _calculate_totals_from_sheet_data(revenue2_rows)
 
                 credit_note_totals = {}
                 if "ลดหนี้" in wb.sheetnames:
@@ -1356,8 +1377,9 @@ def start_reconcile(payload: ReconcileStart):
                     pp30_ws['C4'] = "เดือน"
                     pp30_ws['D4'] = "PP30"
                     pp30_ws['E4'] = "รายได้"
-                    pp30_ws['F4'] = "ลดหนี้"
-                    pp30_ws['G4'] = "Diff"
+                    pp30_ws['F4'] = "รายได้ 2"
+                    pp30_ws['G4'] = "ลดหนี้"
+                    pp30_ws['H4'] = "Diff"
                     thai_months = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
                     for i, month in enumerate(thai_months):
                         pp30_ws[f'C{i+5}'] = month
@@ -1365,27 +1387,44 @@ def start_reconcile(payload: ReconcileStart):
                 pp30_ws = wb["PP30"]
                 for month_num in range(1, 13):
                     pp30_ws[f'E{month_num+4}'] = revenue_totals.get(month_num, 0) if revenue_totals.get(month_num, 0) != 0 else "-"
-                    pp30_ws[f'F{month_num+4}'] = credit_note_totals.get(month_num, 0) if credit_note_totals.get(month_num, 0) != 0 else "-"
+                    pp30_ws[f'F{month_num+4}'] = revenue2_totals.get(month_num, 0) if revenue2_totals.get(month_num, 0) != 0 else "-"
+                    pp30_ws[f'G{month_num+4}'] = credit_note_totals.get(month_num, 0) if credit_note_totals.get(month_num, 0) != 0 else "-"
                 logging.info("9.10. [PP30 Sub-sheet] Finished populating with GL data.")
+
+                # --- Create and Populate PP30 (2) Sheet ---
+                logging.info("9.11. Creating and populating 'PP30 (2)' sheet.")
+                pp30_ws_2 = wb.create_sheet(title="PP30 (2)")
+                pp30_ws_2['C4'] = "เดือน"
+                pp30_ws_2['D4'] = "PP30"
+                pp30_ws_2['E4'] = "รายได้"
+                pp30_ws_2['F4'] = "ลดหนี้"
+                pp30_ws_2['G4'] = "Diff"
+                thai_months = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
+                for i, month in enumerate(thai_months):
+                    pp30_ws_2[f'C{i+5}'] = month
+                
+                for month_num in range(1, 13):
+                    # Use revenue2_totals for the "รายได้" column in this sheet
+                    pp30_ws_2[f'E{month_num+4}'] = revenue2_totals.get(month_num, 0) if revenue2_totals.get(month_num, 0) != 0 else "-"
+                    pp30_ws_2[f'F{month_num+4}'] = credit_note_totals.get(month_num, 0) if credit_note_totals.get(month_num, 0) != 0 else "-"
+                logging.info("9.12. [PP30 (2) Sub-sheet] Finished populating with GL data.")
+
         else:
             logging.warning("6. [GL Parts] GL file not found. Skipping GL-dependent parts.")
 
     # --- PP30 Sub-sheet (from PDF data) ---
     if "pp30_subsheet" in payload.parts:
         logging.info("10. [PP30 Sub-sheet] Starting to populate PP30 data from monthly PDF files.")
-        if "PP30" not in wb.sheetnames:
+        
+        # Get both sheets if they exist
+        pp30_ws = wb["PP30"] if "PP30" in wb.sheetnames else None
+        pp30_ws_2 = wb["PP30 (2)"] if "PP30 (2)" in wb.sheetnames else None
+
+        if not pp30_ws:
             logging.info("10.1. 'PP30' sheet not found, creating it now.")
             pp30_ws = wb.create_sheet(title="PP30")
-            pp30_ws['C4'] = "เดือน"
-            pp30_ws['D4'] = "PP30"
-            pp30_ws['E4'] = "รายได้"
-            pp30_ws['F4'] = "ลดหนี้"
-            pp30_ws['G4'] = "Diff"
-            thai_months = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
-            for i, month in enumerate(thai_months):
-                pp30_ws[f'C{i+5}'] = month
+            # ... (headers)
         
-        pp30_ws = wb["PP30"]
         logging.info("10.2. Looking for 'ภพ30' folder in Google Drive.")
         pp30_folders_query = f"'{company_folder_id}' in parents and name contains 'ภพ30' and mimeType = 'application/vnd.google-apps.folder'"
         pp30_folders = gd.find_files(drive_service, pp30_folders_query)
@@ -1419,14 +1458,24 @@ def start_reconcile(payload: ReconcileStart):
                         logging.warning(f"Could not convert '{amount_str}' to a number for PP30 month {month_str}.")
                         amount = amount_str
                     
-                    pp30_ws[f'D{i+5}'] = amount if amount is not None else "-"
+                    # Populate both sheets with the same PDF data
+                    if pp30_ws:
+                        pp30_ws[f'D{i+5}'] = amount if amount is not None else "-"
+                    if pp30_ws_2:
+                        pp30_ws_2[f'D{i+5}'] = amount if amount is not None else "-"
                 else:
                     logging.info(f"10.5. No PP30 PDF found for month {month_str}.")
-                    pp30_ws[f'D{i+5}'] = "-"
+                    if pp30_ws:
+                        pp30_ws[f'D{i+5}'] = "-"
+                    if pp30_ws_2:
+                        pp30_ws_2[f'D{i+5}'] = "-"
         else:
             logging.warning("10.3. 'ภพ30' folder not found. Skipping PDF data extraction for PP30.")
             for i in range(12):
-                pp30_ws[f'D{i+5}'] = "-"
+                if pp30_ws:
+                    pp30_ws[f'D{i+5}'] = "-"
+                if pp30_ws_2:
+                    pp30_ws_2[f'D{i+5}'] = "-"
         logging.info("10.7. [PP30 Sub-sheet] Finished populating with PDF data.")
     
     # Save and return workbook
