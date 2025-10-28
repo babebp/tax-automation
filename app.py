@@ -8,9 +8,9 @@ load_dotenv(override=True)
 # Base URL for the FastAPI backend
 API_BASE = st.secrets.get("API_BASE", "http://localhost:8000")
 
-st.set_page_config(page_title="Tax Automation", layout="wide")
+st.set_page_config(page_title="Accounting Reconciliation Portal", layout="wide")
 
-st.title("Tax Automation")
+st.title("Accounting Reconciliation Portal")
 
 # Create tabs for different sections of the app
 tab1, tab2, tab3 = st.tabs(["Company Config", "Workflow", "Reconcile"])
