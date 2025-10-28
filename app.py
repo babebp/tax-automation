@@ -340,7 +340,6 @@ with tab3:
         st.subheader("Select parts to run:")
         run_tb_subsheet = st.checkbox("TB Sub-sheet", value=True)
         run_gl_subsheet = st.checkbox("GL Sub-sheet", value=True)
-        run_tb_code_subsheets = st.checkbox("TB Code Sub-sheets", value=True)
         run_pp30_subsheet = st.checkbox("PP30 Sub-sheet", value=True)
         st.divider()
 
@@ -350,8 +349,6 @@ with tab3:
                 parts_to_run.append("tb_subsheet")
             if run_gl_subsheet:
                 parts_to_run.append("gl_subsheet")
-            if run_tb_code_subsheets:
-                parts_to_run.append("tb_code_subsheets")
             if run_pp30_subsheet:
                 parts_to_run.append("pp30_subsheet")
 
@@ -367,7 +364,7 @@ with tab3:
                     r.raise_for_status()
                     
                     # Construct the filename directly on the frontend
-                    filename = f"{selected_name}_{selected_year}{selected_month}_reconcile.xlsx" 
+                    filename = f"{selected_name}_{selected_year}{selected_month}_reconcile.xlsx"
 
                     st.success("✅ Reconcile complete!")
                     st.download_button(
@@ -387,3 +384,4 @@ with tab3:
                     st.error(f"An unexpected error occurred: {e}")
     else:
         st.info("ยังไม่มีบริษัทในระบบ")
+
