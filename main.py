@@ -249,6 +249,8 @@ PROMPTS = {
     "SSO": "ภายในหัวข้อ \"จำนวนเงินที่ำระ\" ให้ตัวเลออกมา ตอบกลับเฉพาะตัวเลขเท่านั้น ห้ามมีตัวหนังสือเด็ดขาด"
 }
 
+THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
+
 # ... (FastAPI app setup and other endpoints remain the same) ...
 app = FastAPI(title="Company Settings API", version="1.0.0")
 
@@ -1214,7 +1216,7 @@ def start_reconcile(payload: ReconcileStart):
         sheet['B3'] = 'xxxxxx - xxxxxx'
         sheet['B5'] = '* รวมบัญชียอดเป็น 0 N'
         sheet['B4'] = '_ ถึง _'
-        sheet['B2'] = 'xx มกราคม xxx'
+        sheet['B2'] = f'{THAI_MONTHS[int(payload.month) - 1]} {payload.year}'
         logging.info("5.6. [TB Sub-sheet] Finished TB sub-sheet creation.")
 
     # --- GL-related Parts ---
