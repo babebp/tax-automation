@@ -850,6 +850,18 @@ def start_workflow(payload: WorkflowStart):
                 status, done = downloader.next_chunk()
             fh.seek(0)
             df = pd.read_excel(fh, header=None)
+
+            # Get SSO amount from cell D14
+            sso_amount = "N/A"
+            if df.shape[0] >= 14 and df.shape[1] >= 4:
+                sso_cell_value = df.iloc[13, 3] # D14 is at index (13, 3)
+                if pd.notna(sso_cell_value) and sso_cell_value != '-':
+                    try:
+                        sso_amount = float(sso_cell_value)
+                    except (ValueError, TypeError):
+                        sso_amount = "Invalid Value"
+            vat_amounts["SSO"] = sso_amount
+            
             for index, row in df.iterrows():
                 if len(row) > 3:
                     cell_value = str(row.iloc[1])
@@ -961,7 +973,7 @@ def start_workflow(payload: WorkflowStart):
     virtual_workbook = BytesIO()
     wb.save(virtual_workbook)
     virtual_workbook.seek(0)
-    filename = f"{company_name}_{payload.year}_{payload.month}_workflow.xlsx"
+    filename = f"{company_name}_{payload.year}{payload.month}_workflow.xlsx"
     logging.info(f"Returning Excel file: {filename}")
     
     # Properly encode filename for HTTP headers
@@ -1460,7 +1472,7 @@ def start_reconcile(payload: ReconcileStart):
     virtual_workbook = BytesIO()
     wb.save(virtual_workbook)
     virtual_workbook.seek(0)
-    filename = f"{company_name}_reconcile.xlsx"
+    filename = f"{company_name}_{payload.year}{payload.month}_reconcile.xlsx"
     logging.info(f"11.1. Returning Excel file: {filename}")
 
     encoded_filename = quote(filename)

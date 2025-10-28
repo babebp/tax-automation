@@ -292,7 +292,7 @@ with tab2:
                     r.raise_for_status()
                     
                     # Construct the filename directly on the frontend
-                    filename = f"{selected_name}_{selected_year}_{selected_month}_workflow.xlsx"
+                    filename = f"{selected_name}_{selected_year}{selected_month}_workflow.xlsx"
 
                     st.success("✅ Workflow complete!")
                     st.download_button(
@@ -367,7 +367,7 @@ with tab3:
                     r.raise_for_status()
                     
                     # Construct the filename directly on the frontend
-                    filename = f"{selected_name}_{selected_year}_reconcile.xlsx"
+                    filename = f"{selected_name}_{selected_year}{selected_month}_reconcile.xlsx" 
 
                     st.success("✅ Reconcile complete!")
                     st.download_button(
