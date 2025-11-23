@@ -2,7 +2,10 @@ from io import BytesIO
 from copy import copy
 from urllib.parse import quote
 from googleapiclient.http import MediaIoBaseDownload
-import google.generativeai as genai 
+import google.generativeai as genai
+import vertexai
+from google.auth import default
+from vertexai.generative_models import GenerativeModel, Part
 import logging
 from typing import List, Optional, Dict
 from fastapi import FastAPI, HTTPException, Depends
@@ -37,14 +40,23 @@ except ImportError:
     CAN_TRANSLATE = False
     logging.warning("Could not import openpyxl.formula.translate.Translator. Formulas will be copied without adjusting references.")
 
-# Configure Gemini API
-# IMPORTANT: The API key should be set in your environment or a secure config
-# For this project, we assume it's in .streamlit/secrets.toml and loaded by the environment
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+# Configure Vertex AI
+PROJECT_ID = os.environ.get("GCP_PROJECT")
+LOCATION = os.environ.get("GCP_REGION")
+IS_VERTEX_INITIALIZED = False # Initialize the flag
+
+if PROJECT_ID and LOCATION:
+    try:
+        credentials, _ = default()
+        vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
+        logging.info("Vertex AI initialized successfully.")
+        IS_VERTEX_INITIALIZED = True
+    except Exception as e:
+        logging.error(f"Failed to initialize Vertex AI: {e}")
+        IS_VERTEX_INITIALIZED = False
 else:
-    logging.warning("GEMINI_API_KEY environment variable not set. PDF processing will fail.")
+    logging.warning("GCP_PROJECT and/or GCP_REGION environment variables not set. PDF processing will fail.")
+    IS_VERTEX_INITIALIZED = False
 
 # Configure LINE API
 LINE_API_URL = "https://api.line.me/v2/bot/message/push"
@@ -210,18 +222,19 @@ class LineGroup(BaseModel):
 
 # ---------- New Helper Functions for PDF and LLM ----------
 def get_amount_from_gemini(file_content: bytes, prompt: str) -> str:
-    """Sends a PDF file to Gemini LLM for OCR and returns the extracted amount."""
-    if not GEMINI_API_KEY:
-        return "GEMINI_API_KEY not set"
+    """Sends a PDF file to Gemini LLM on Vertex AI for OCR and returns the extracted amount."""
+    if not IS_VERTEX_INITIALIZED:
+        return "Vertex AI not initialized"
     if not file_content:
         return "No file content"
 
     try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        response = model.generate_content([prompt, {"mime_type": "application/pdf", "data": file_content}])
+        model = GenerativeModel('gemini-2.5-flash') # Using a recommended model for Vertex
+        pdf_part = Part.from_data(file_content, mime_type="application/pdf")
+        response = model.generate_content([prompt, pdf_part])
         return response.text.strip()
     except Exception as e:
-        logging.error(f"Gemini API call failed: {e}")
+        logging.error(f"Vertex AI API call failed: {e}")
         return f"Error: {e}"
 
 def clean_and_convert_to_float(text: str) -> Optional[float]:

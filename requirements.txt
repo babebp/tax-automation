@@ -10,3 +10,4 @@ uvicorn
 gunicorn
 pandas
 xlrd
+vertexai
