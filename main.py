@@ -1434,7 +1434,16 @@ def start_reconcile(payload: ReconcileStart):
         if not pp30_ws:
             logging.info("10.1. 'PP30' sheet not found, creating it now.")
             pp30_ws = wb.create_sheet(title="PP30")
-            # ... (headers)
+            pp30_ws['C4'] = "เดือน"
+            pp30_ws['D4'] = "PP30"
+            pp30_ws['E4'] = "รายได้"
+            pp30_ws['F4'] = "รายได้ 2"
+            pp30_ws['G4'] = "ลดหนี้"
+            pp30_ws['H4'] = "Diff"
+            
+            thai_months = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
+            for i, month in enumerate(thai_months):
+                pp30_ws[f'C{i+5}'] = month
         
         logging.info("10.2. Looking for 'ภพ30' folder in Google Drive.")
         pp30_folders_query = f"'{company_folder_id}' in parents and name contains 'ภพ30' and mimeType = 'application/vnd.google-apps.folder'"
