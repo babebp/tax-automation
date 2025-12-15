@@ -6,7 +6,7 @@ API_BASE = st.secrets.get("API_BASE", "http://localhost:8000")
 
 st.set_page_config(page_title="LINE Notification", layout="wide")
 
-st.image("logo.jpg", width=200)
+st.image("logo.png", width=200)
 
 st.title("LINE Notification")
 
